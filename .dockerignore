@@ -1,0 +1,6 @@
+Dockerfile
+Makefile
+.git
+.env*
+fly.toml
+out

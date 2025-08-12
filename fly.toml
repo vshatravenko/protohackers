@@ -1,0 +1,27 @@
+primary_region = 'yyz'
+
+[build]
+  [build.args]
+    GO_VERSION = '1.24.5'
+
+[env]
+  PORT = '8080'
+
+[[services]]
+  internal_port = 4269
+  protocol = 'tcp'
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[services.ports]]
+    port = 4269
+
+[services.concurrency]
+  type = 'connections'
+  hard_limit = 5
+  soft_limit = 5
+
+[[vm]]
+  size = 'shared-cpu-1x'

@@ -1,12 +1,11 @@
 package main
 
 import (
-	"errors"
+	"bufio"
 	"io"
 	"log/slog"
 	"net"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -14,7 +13,7 @@ const (
 	defaultNet     = "tcp4"
 	defaultPort    = 4269
 	defaultAddr    = "0.0.0.0:4269"
-	defaultBufSize = 128
+	defaultBufSize = 4096
 	defaultTTL     = 60 * time.Second
 )
 
@@ -36,57 +35,38 @@ func main() {
 			continue
 		}
 
-		go handleConnection(conn)
+		slog.Info("Handling conn", "addr", conn.RemoteAddr())
+		go handleBufferedConn(conn)
 	}
 }
 
-func handleConnection(conn net.Conn) {
+// I'd like to read the connection in a buffered way
+// and only start writing back after the whole thing is read
+func handleBufferedConn(conn net.Conn) {
 	defer func() {
 		if err := conn.Close(); err != nil {
-			slog.Error("Failed to close a conn", "addr", conn.RemoteAddr(), "err", err.Error())
+			slog.Warn("Conn close failed", "addr", conn.RemoteAddr(), "err", err.Error())
 		}
 	}()
 
-	slog.Info("Handling new conn", "addr", conn.RemoteAddr())
+	reader := bufio.NewReader(conn)
+	buf := make([]byte, defaultBufSize)
 
-	if err := conn.SetDeadline(time.Now().Add(defaultTTL)); err != nil {
-		slog.Error("Failed to set a deadline for a conn", "addr", conn.RemoteAddr(), "err", err.Error())
-		return
-	}
-
-	inProgress := true
-	for inProgress {
-		buf := make([]byte, defaultBufSize)
-		count, err := conn.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				slog.Info("Finished reading from conn", "addr", conn.RemoteAddr())
-				inProgress = false
-			} else {
-				if errors.Is(err, syscall.ECONNRESET) {
-					slog.Info("Closed conn", "addr", conn.RemoteAddr(), "reason", "reset by peer")
-				} else {
-					slog.Warn("Failed to read from conn", "addr", conn.RemoteAddr(), "err", err.Error())
-				}
-
-				return
-			}
+	for {
+		slog.Info("Reading from conn", "addr", conn.RemoteAddr())
+		n, err := reader.Read(buf)
+		if err == io.EOF {
+			return
+		} else if err != nil {
+			slog.Error("Could not read from conn", "addr", conn.RemoteAddr(), "err", err.Error())
 		}
 
-		slog.Info("Read bytes from conn", "addr", conn.RemoteAddr(), "bytes", string(buf), "count", count)
-
-		count, err = conn.Write(buf)
-		if err != nil {
-			if err != io.EOF {
-				slog.Warn("Failed to write to conn", "addr", conn.RemoteAddr(), "err", err.Error())
-				return
-			}
-
-			slog.Info("Finished writing to conn", "addr", conn.RemoteAddr())
+		slog.Info("Writing to conn", "addr", conn.RemoteAddr())
+		if _, err = conn.Write(buf[:n]); err != nil {
+			slog.Error("Could not write to conn", "addr", conn.RemoteAddr(), "err", err.Error())
 		}
-		slog.Info("Wrote bytes to conn", "addr", conn.RemoteAddr(), "bytes", string(buf), "count", count)
-
 	}
+
 }
 
 func configureTCPAddr(ip net.IP, port int) *net.TCPAddr {
