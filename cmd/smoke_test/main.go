@@ -21,7 +21,7 @@ var defaultIP = net.IPv4(0, 0, 0, 0)
 
 func main() {
 	addr := configureTCPAddr(defaultIP, defaultPort)
-	slog.Info("Listening for new connections", "addr", addr)
+	slog.Info("[smoke_test] Listening for new connections", "addr", addr)
 	listener, err := net.ListenTCP(defaultNet, addr)
 	if err != nil {
 		slog.Info("ListenTCP failed", "err", err.Error())
