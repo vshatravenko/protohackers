@@ -11,7 +11,7 @@ import (
 const (
 	ipEnvVar    = "PROTO_IP"
 	portEnvVar  = "PROTO_PORT"
-	defaultPort = 4269
+	DefaultPort = 4269
 	netEnvVar   = "PROTO_NET"
 	defaultNet  = "tcp4"
 )
@@ -47,7 +47,7 @@ func NewTCPServerFromEnv(handler func(net.Conn)) (*TCPServer, error) {
 	var port int
 	portRaw, ok := os.LookupEnv(portEnvVar)
 	if !ok {
-		port = defaultPort
+		port = DefaultPort
 	} else {
 		port, err = strconv.Atoi(portRaw)
 		if err != nil {
