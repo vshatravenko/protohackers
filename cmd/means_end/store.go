@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"slices"
 )
 
@@ -26,23 +27,21 @@ func newStore() *store {
 	}
 }
 
-func (s store) insert(r record) {
-	curData := s.data
-
-	if len(curData) == 0 {
+func (s *store) insert(r record) {
+	if len(s.data) == 0 {
 		s.data = append(s.data, r)
 		return
 	}
 
-	for i := range len(curData) {
-		if i == len(curData)-1 {
-			if r.date <= curData[i].date {
+	for i := range len(s.data) {
+		if i == len(s.data)-1 {
+			if r.date <= s.data[i].date {
 				s.data = slices.Insert(s.data, i, r)
 			} else {
 				s.data = append(s.data, r)
 			}
 		} else {
-			if r.date <= curData[i].date {
+			if r.date <= s.data[i].date {
 				s.data = slices.Insert(s.data, i, r)
 			}
 		}
@@ -80,4 +79,13 @@ func (s store) seek(targetDate int32) int {
 	}
 
 	return -1
+}
+
+func (s store) String() string {
+	res := ""
+	for _, record := range s.data {
+		res += fmt.Sprintf("%d - %d\n", record.date, record.price)
+	}
+
+	return res
 }

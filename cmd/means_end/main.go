@@ -33,7 +33,6 @@ func handler(conn net.Conn) {
 	}()
 
 	st := newStore()
-
 	for {
 		buf := make([]byte, reqSize)
 		n, err := conn.Read(buf)
@@ -56,9 +55,10 @@ func handler(conn net.Conn) {
 			return
 		}
 
-		if p.action == 'I' {
+		switch p.action {
+		case actionInsert:
 			st.insert(newRecord(p.segment1, p.segment2))
-		} else {
+		case actionQuery:
 			mean := st.mean(p.segment1, p.segment2)
 			respBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(respBuf, uint32(mean))
@@ -68,6 +68,9 @@ func handler(conn net.Conn) {
 				slog.Error("Could not write response to conn", "addr", conn.RemoteAddr(), "err", err.Error())
 				return
 			}
+		default:
+			slog.Warn("Unknown action, closing conn", "addr", conn.RemoteAddr(), "action", string(p.action))
+			return
 		}
 	}
 }
