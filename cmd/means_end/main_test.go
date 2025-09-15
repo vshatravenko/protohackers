@@ -58,6 +58,14 @@ func TestMain(t *testing.T) {
 
 	t.Logf("Inserting %d random payloads", randomPayloadCount)
 	insertRandomPayloads(t, conn, randomPayloadCount)
+
+	for _, p := range payloads {
+		t.Logf("Sending test payload %v", p)
+		_, err := conn.Write(p.toBytes())
+		if err != nil {
+			t.Errorf("Failed to send the payload: %v", err)
+		}
+	}
 }
 
 func insertRandomPayloads(t *testing.T, conn *net.TCPConn, count int) {

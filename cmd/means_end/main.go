@@ -1,19 +1,32 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/pprof"
 
 	"github.com/vshatravenko/protohackers/internal/server"
 )
 
 const (
 	reqSize = 9
+	bufSize = 100000
 )
 
 func main() {
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/profile", pprof.Profile)
+		err := http.ListenAndServe(":7777", mux)
+		if err != nil {
+			slog.Error("failed to serve profiler HTTP server", "err", err)
+		}
+	}()
+
 	srv, err := server.NewTCPServerFromEnv(handler)
 	if err != nil {
 		slog.Error("Could not create TCPServer", "err", err.Error())
@@ -33,9 +46,10 @@ func handler(conn net.Conn) {
 	}()
 
 	st := newStore()
+	buf := make([]byte, reqSize)
+	reader := bufio.NewReaderSize(conn, bufSize)
 	for {
-		buf := make([]byte, reqSize)
-		n, err := conn.Read(buf)
+		n, err := reader.Read(buf)
 		if err == io.EOF {
 			slog.Info("Finished reading conn", "addr", conn.RemoteAddr())
 			return

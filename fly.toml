@@ -19,6 +19,18 @@ primary_region = 'yyz'
   [[services.ports]]
     port = 4269
 
+[[services]]
+  internal_port = 7777
+  protocol = 'tcp'
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[services.ports]]
+    port = 7777
+
+
 [services.concurrency]
   type = 'connections'
   hard_limit = 5
