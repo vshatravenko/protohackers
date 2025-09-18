@@ -71,9 +71,14 @@ func handler(conn net.Conn) {
 
 		switch p.action {
 		case actionInsert:
+			slog.Info("Started inserting record", "date", p.segment1, "price", p.segment2)
 			st.insert(newRecord(p.segment1, p.segment2))
+			slog.Info("Finished inserting record", "date", p.segment1, "price", p.segment2)
 		case actionQuery:
+			slog.Info("Started calculating mean", "startDate", p.segment1, "endDate", p.segment2)
 			mean := st.mean(p.segment1, p.segment2)
+			slog.Info("Finished calculating mean", "startDate", p.segment1, "endDate", p.segment2)
+
 			respBuf := make([]byte, 4)
 			binary.BigEndian.PutUint32(respBuf, uint32(mean))
 
