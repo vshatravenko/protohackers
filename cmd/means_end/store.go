@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"sort"
 )
 
 type record struct {
@@ -27,7 +28,7 @@ func newStore() *store {
 	}
 }
 
-func (s *store) insert(r *record) {
+func (s *store) insertOld(r *record) {
 	if len(s.data) == 0 {
 		s.data = append(s.data, r)
 		return
@@ -48,10 +49,22 @@ func (s *store) insert(r *record) {
 	}
 }
 
+func (s *store) insert(r *record) {
+	s.data = append(s.data, r)
+}
+
+func (s *store) sort() {
+	sort.Slice(s.data, func(i, j int) bool {
+		return s.data[i].date < s.data[j].date
+	})
+}
+
 func (s store) mean(startDate, endDate int32) int32 {
 	if endDate < startDate {
 		return 0
 	}
+
+	s.sort()
 
 	startPos := s.seekStart(startDate)
 	if startPos == -1 {

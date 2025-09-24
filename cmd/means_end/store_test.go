@@ -159,6 +159,8 @@ func TestStoreSortedProperty(t *testing.T) {
 		return expected[i].date < expected[j].date
 	})
 
+	st.sort()
+
 	t.Logf("Comparing the actual & expected data")
 	for i := range len(st.data) {
 		if st.data[i] != expected[i] {
