@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 )
@@ -59,7 +60,7 @@ func (s *store) sort() {
 	})
 }
 
-func (s store) mean(startDate, endDate int32) int32 {
+func (s *store) mean(startDate, endDate int32) int32 {
 	if endDate < startDate {
 		return 0
 	}
@@ -71,17 +72,19 @@ func (s store) mean(startDate, endDate int32) int32 {
 		return 0
 	}
 
-	var total, count int32
+	var total, count int
 	for i := startPos; i < len(s.data) && s.data[i].date <= endDate; i++ {
-		total += s.data[i].price
+		total += int(s.data[i].price)
 		count++
 	}
+
+	slog.Info("Mean calculated", "start", startDate, "end", endDate, "total", total, "count", count)
 
 	if count == 0 {
 		return 0
 	}
 
-	return total / count
+	return int32(total / count)
 }
 
 // Either find an exact match or find the point

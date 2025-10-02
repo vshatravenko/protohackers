@@ -46,20 +46,15 @@ func handler(conn net.Conn) {
 	}()
 
 	st := newStore()
-	buf := make([]byte, reqSize)
+	buf := make([]byte, 9)
 	reader := bufio.NewReaderSize(conn, bufSize)
 	for {
-		n, err := reader.Read(buf)
+		_, err := io.ReadFull(reader, buf)
 		if err == io.EOF {
 			slog.Info("Finished reading conn", "addr", conn.RemoteAddr())
 			return
 		} else if err != nil {
-			slog.Error("Could not read from conn", "addr", conn.RemoteAddr())
-			return
-		}
-
-		if n != reqSize {
-			slog.Error("Incomplete payload", "addr", conn.RemoteAddr(), "payload", buf[:n], "len", n)
+			slog.Error("Could not read from conn", "addr", conn.RemoteAddr(), "err", err.Error())
 			return
 		}
 
@@ -71,9 +66,7 @@ func handler(conn net.Conn) {
 
 		switch p.action {
 		case actionInsert:
-			slog.Info("Started inserting record", "date", p.segment1, "price", p.segment2)
 			st.insert(newRecord(p.segment1, p.segment2))
-			slog.Info("Finished inserting record", "date", p.segment1, "price", p.segment2)
 		case actionQuery:
 			slog.Info("Started calculating mean", "startDate", p.segment1, "endDate", p.segment2)
 			mean := st.mean(p.segment1, p.segment2)

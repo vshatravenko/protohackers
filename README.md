@@ -21,4 +21,5 @@ You can run `make help` to display the most commonly used `make` targets.
 The currently implemented challenges are:
 
 1. [Smoke Test](https://protohackers.com/problem/0) - [smoke_test](./cmd/smoke_test)
-2. [Prime Time](https://protohackers.com/problem/1) - [prime_time](./cmd/prime_time)
+1. [Prime Time](https://protohackers.com/problem/1) - [prime_time](./cmd/prime_time)
+1. [Means to an End](https://protohackers.com/problem/2) - [means_end](./cmd/means_end)

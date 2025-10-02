@@ -10,26 +10,18 @@ help:
 out:
 	mkdir out
 
-.PHONY: smoke
-smoke: out
-	CGO_ENABLED=0 go build -o out/smoke_test ./cmd/smoke_test
+.PHONY: build
+build: out
+	CGO_ENABLED=0 go build -o out/$(TARGET_BINARY) ./cmd/$(TARGET_BINARY)
 
-.PHONY: run-smoke
-run-smoke: smoke
-	go run ./cmd/smoke_test
+.PHONY: build
+build-linux: out
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/$(TARGET_BINARY) ./cmd/$(TARGET_BINARY)
 
 ## run: run the target binary locally
 .PHONY: run
 run:
 	go run ./cmd/$(TARGET_BINARY)
-
-.PHONY: prime
-prime: out
-	CGO_ENABLED=0 go build -o out/prime_time ./cmd/prime_time
-
-.PHONY: run-smoke
-run-prime: prime
-	go run ./cmd/prime_time
 
 ## docker: build the target Docker image
 .PHONY: docker
@@ -45,3 +37,14 @@ docker-run:
 deploy:
 	@echo Deploying $(TARGET_BINARY)
 	fly deploy -a $(FLY_APP_NAME) --build-arg TARGET_BINARY=$(TARGET_BINARY)
+
+## upload-dev
+.PHONY: upload-dev
+upload-dev: build-linux
+	@echo Uploading $(TARGET_BINARY) to $(DEV_VM_USER)@$(DEV_VM_IP)
+	scp out/$(TARGET_BINARY) $(DEV_VM_USER)@$(DEV_VM_IP):
+
+## connect-dev
+.PHONY: connect-dev
+connect-dev:
+	ssh $(DEV_VM_USER)@$(DEV_VM_IP)
