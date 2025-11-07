@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	ipEnvVar    = "PROTO_IP"
-	portEnvVar  = "PROTO_PORT"
-	DefaultPort = 4269
-	netEnvVar   = "PROTO_NET"
-	defaultNet  = "tcp4"
+	ipEnvVar      = "PROTO_IP"
+	portEnvVar    = "PROTO_PORT"
+	DefaultPort   = 4269
+	netEnvVar     = "PROTO_NET"
+	defaultTCPNet = "tcp4"
+	defaultUDPNet = "udp4"
 )
 
 var LocalIP = net.IPv4(0, 0, 0, 0)
@@ -57,7 +58,7 @@ func NewTCPServerFromEnv(handler func(net.Conn)) (*TCPServer, error) {
 
 	network, ok := os.LookupEnv(netEnvVar)
 	if !ok {
-		network = defaultNet
+		network = defaultTCPNet
 	}
 
 	return NewTCPServer(ip, port, network, handler), nil
