@@ -6,7 +6,18 @@ primary_region = 'yyz'
     TARGET_BINARY = 'smoke_test'
 
 [env]
-  PORT = '8080'
+  PROTO_UDP_ADDR = 'fly-global-services:4269'
+
+[[services]]
+  internal_port = 4269
+  protocol = 'udp'
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[services.ports]]
+    port = 4269
 
 [[services]]
   internal_port = 4269

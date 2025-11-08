@@ -9,11 +9,13 @@ import (
 )
 
 const (
-	ipEnvVar      = "PROTO_IP"
+	udpAddrEnvVar = "PROTO_UDP_ADDR"
+	tcpIpEnvVar   = "PROTO_TCP_IP"
 	portEnvVar    = "PROTO_PORT"
 	DefaultPort   = 4269
-	netEnvVar     = "PROTO_NET"
+	tcpNetEnvVar  = "PROTO_NET_TCP"
 	defaultTCPNet = "tcp4"
+	udpNetEnvVar  = "PROTO_NET_UDP"
 	defaultUDPNet = "udp4"
 )
 
@@ -35,7 +37,7 @@ func configureTCPAddr(ip net.IP, port int) *net.TCPAddr {
 func NewTCPServerFromEnv(handler func(net.Conn)) (*TCPServer, error) {
 	var err error
 	var ip net.IP
-	ipRaw, ok := os.LookupEnv(ipEnvVar)
+	ipRaw, ok := os.LookupEnv(tcpIpEnvVar)
 	if !ok {
 		ip = LocalIP
 	} else {
@@ -56,7 +58,7 @@ func NewTCPServerFromEnv(handler func(net.Conn)) (*TCPServer, error) {
 		}
 	}
 
-	network, ok := os.LookupEnv(netEnvVar)
+	network, ok := os.LookupEnv(tcpNetEnvVar)
 	if !ok {
 		network = defaultTCPNet
 	}
