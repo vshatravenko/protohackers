@@ -23,3 +23,6 @@ The currently implemented challenges are:
 1. [Smoke Test](https://protohackers.com/problem/0) - [smoke_test](./cmd/smoke_test)
 1. [Prime Time](https://protohackers.com/problem/1) - [prime_time](./cmd/prime_time)
 1. [Means to an End](https://protohackers.com/problem/2) - [means_end](./cmd/means_end)
+1. [Budget Chat](https://protohackers.com/problem/3) - [budget_chat](./cmd/budget_chat)
+1. [Unusual Database Program](https://protohackers.com/problem/4) - [unusual_database](./cmd/unusual_database)
+1. [Mob in the Middle](https://protohackers.com/problem/5) - [mob_middle](./cmd/mob_middle)

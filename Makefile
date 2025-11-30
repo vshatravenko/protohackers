@@ -23,6 +23,16 @@ build-linux: out
 run:
 	go run ./cmd/$(TARGET_BINARY)
 
+## test: execute tests for the target binary
+.PHONY: test
+test:
+	go test -v ./cmd/$(TARGET_BINARY)/*go
+
+## bench: execute benchmarks for the target binary
+.PHONY: bench
+bench:
+	go test -v -run='^$' -bench='^Bench.*$' ./cmd/$(TARGET_BINARY)/*go
+
 ## docker: build the target Docker image
 .PHONY: docker
 docker:
