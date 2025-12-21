@@ -1,25 +1,34 @@
 package main
 
-import "log/slog"
+import (
+	"log/slog"
+	"net"
+)
 
-func handlePayload(payload []byte) {
+func (d *daemon) handleConn(conn net.Conn, payload []byte) {
 	msgType := uint8(payload[0])
 	payload = payload[1:]
 
 	switch msgType {
 	case msgTypes["error"]:
-		parseErrorMsg(payload)
+		slog.Debug("parsed error msg", "addr", conn.RemoteAddr(), "msg", parseErrorMsg(payload))
 	case msgTypes["plate"]:
-		parsePlateMsg(payload)
-	case msgTypes["ticket"]:
+		msg := parsePlateMsg(payload)
+		slog.Debug("parsed plate msg", "addr", conn.RemoteAddr(), "msg", msg)
+	case msgTypes["ticket"]: // this will never be sent initially
 		slog.Debug("parsing ticket msg")
-	case msgTypes["want_heartbeat"]:
-		parseWantHeartbeatMsg(payload)
-	case msgTypes["heartbeat"]:
+	case msgTypes["want_heartbeat"]: // ditto
+		msg := parseWantHeartbeatMsg(payload)
+		slog.Debug("parsed want_heartbeat msg", "addr", conn.RemoteAddr(), "msg", msg)
+	case msgTypes["heartbeat"]: // this is only sent by the server
 		slog.Debug("parsing heartbeat msg")
 	case msgTypes["camera"]:
-		parseCameraMsg(payload)
+		msg := parseCameraMsg(payload)
+		d.addCamera(conn, msg.road, msg.mile, msg.limit)
+		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr(), "msg", msg)
 	case msgTypes["dispatcher"]:
-		parseDispatcherMsg(payload)
+		msg := parseDispatcherMsg(payload)
+		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)
+		d.addDispatcher(conn, msg.roads)
 	}
 }

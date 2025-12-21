@@ -46,6 +46,14 @@ func parsePlateMsg(input []byte) plateMsg {
 	}
 }
 
+func (pm *plateMsg) Bytes() []byte {
+	res := fixedStrToBytes(pm.plate)
+
+	binary.BigEndian.AppendUint32(res, pm.timestamp)
+
+	return res
+}
+
 type ticketMsg struct {
 	plate      string
 	road       uint16
@@ -60,6 +68,13 @@ type wantHeartbeatMsg struct {
 	interval uint32 // deciseconds, 25 == 2.5 seconds
 }
 
+func (whm *wantHeartbeatMsg) Bytes() []byte {
+	res := []byte{msgTypes["want_heartbeat"]}
+	binary.BigEndian.AppendUint32(res, whm.interval)
+
+	return res
+}
+
 func parseWantHeartbeatMsg(input []byte) wantHeartbeatMsg {
 	interval := binary.BigEndian.Uint32(input)
 
@@ -67,6 +82,10 @@ func parseWantHeartbeatMsg(input []byte) wantHeartbeatMsg {
 }
 
 type heartbeatMsg uint8
+
+func (hm *heartbeatMsg) Bytes() []byte {
+	return []byte{msgTypes["heartbeat"]}
+}
 
 type iAmCameraMsg struct {
 	road  uint16
@@ -82,6 +101,16 @@ func parseCameraMsg(input []byte) iAmCameraMsg {
 	return iAmCameraMsg{road: road, mile: mile, limit: limit}
 }
 
+func (cm *iAmCameraMsg) Bytes() []byte {
+	res := []byte{msgTypes["camera"]}
+
+	res = binary.BigEndian.AppendUint16(res, cm.road)
+	res = binary.BigEndian.AppendUint16(res, cm.mile)
+	res = binary.BigEndian.AppendUint16(res, cm.limit)
+
+	return res
+}
+
 type iAmDispatcherMsg struct {
 	numRoads uint8
 	roads    []uint16
@@ -91,11 +120,21 @@ func parseDispatcherMsg(input []byte) iAmDispatcherMsg {
 	numRoads := uint8(input[0])
 
 	roads := make([]uint16, numRoads)
-	for i := uint8(0); i < numRoads; i++ {
+	for i := range numRoads {
 		roads[i] = binary.BigEndian.Uint16(input[i : i+2])
 	}
 
 	return iAmDispatcherMsg{numRoads: numRoads, roads: roads}
+}
+
+func (dm *iAmDispatcherMsg) Bytes() []byte {
+	res := []byte{msgTypes["dispatcher"], dm.numRoads}
+
+	for _, road := range dm.roads {
+		res = binary.BigEndian.AppendUint16(res, road)
+	}
+
+	return res
 }
 
 func parseStr(input []byte, start int) string {

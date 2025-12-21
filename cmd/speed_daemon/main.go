@@ -8,10 +8,17 @@ import (
 	"github.com/vshatravenko/protohackers/internal/server"
 )
 
+const (
+	bufSize = 512
+)
+
 func main() {
 	logger.ConfigureDefaultLoggerFromEnv()
 
-	srv, err := server.NewTCPServerFromEnv(handler)
+	d := newDaemon()
+	go d.handleHeartbeat()
+
+	srv, err := server.NewTCPServerFromEnv(handler(d))
 	if err != nil {
 		slog.Error("Could not create TCPServer", "err", err.Error())
 	}
@@ -31,5 +38,24 @@ TODO:
 5. Avoid issuing more than one ticket per car per day
 6. Reliably deliver ticket messages to dispatchers
 */
-func handler(conn net.Conn) {
+func handler(d *daemon) func(net.Conn) {
+	return func(conn net.Conn) {
+		defer func() {
+			err := conn.Close()
+			if err != nil {
+				slog.Info("conn close failed", "addr", conn.RemoteAddr(), "err", err.Error())
+			}
+		}()
+
+		b := make([]byte, bufSize)
+
+		n, err := conn.Read(b)
+		if err != nil {
+			slog.Warn("initial conn read failed", "addr", conn.RemoteAddr(), "err", err.Error())
+			return
+		}
+
+		payload := b[:n]
+		d.handleConn(conn, payload)
+	}
 }
