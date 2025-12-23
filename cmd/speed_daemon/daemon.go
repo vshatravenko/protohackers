@@ -2,28 +2,32 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net"
 	"slices"
+	"sync"
 	"time"
 )
 
 type daemon struct {
-	cameras     map[uint16]*camera
 	dispatchers []*dispatcher
 	records     map[string][]record
+	recordsLock *sync.RWMutex
 	tickets     map[string][]*ticket
+	ticketsLock *sync.RWMutex
 	heartbeat   chan *net.TCPConn
 }
 
 func newDaemon() *daemon {
 	return &daemon{
-		cameras:     make(map[uint16]*camera),
 		dispatchers: make([]*dispatcher, 0),
 		records:     make(map[string][]record),
+		recordsLock: new(sync.RWMutex),
 		tickets:     make(map[string][]*ticket),
+		ticketsLock: new(sync.RWMutex),
 	}
 }
 
@@ -44,11 +48,19 @@ func (d *daemon) handleHeartbeat() {
 
 // Should we add a camera and create new goroutines tracked by a waitgroup
 // or simply use the existing process to keep the connection loop?
-func (d *daemon) addCamera(conn net.Conn, road, mile, limit uint16) {
-	slog.Info("handling new camera", "addr", conn.RemoteAddr(), "road", road, "mile", mile, "limit", limit)
-	c := &camera{conn: conn, road: road, mile: mile, limit: limit}
-	d.cameras[road] = c
+func (d *daemon) handleCamera(conn net.Conn, initPayload []byte) {
+	slog.Info("handling new camera", "addr", conn.RemoteAddr(), "payload", initPayload)
+	cMsg := parseCameraMsg(initPayload)
+	c := &camera{conn: conn, road: cMsg.road, mile: cMsg.mile, limit: cMsg.limit}
+	slog.Info("parsed new camera", "addr", conn.RemoteAddr(), "camera", c)
 	defer closeConn(conn)
+
+	// the length of iAmCamera msg is 6
+	initPayload = initPayload[6:]
+
+	if len(initPayload) > 0 {
+		d.processCameraPayload(c, initPayload)
+	}
 
 	for {
 		b := make([]byte, bufSize)
@@ -59,9 +71,31 @@ func (d *daemon) addCamera(conn net.Conn, road, mile, limit uint16) {
 		}
 
 		payload := b[:n]
-		msg := parsePlateMsg(payload[1:])
-		slog.Info("parsed plate message", "road", c.road, "mile", c.mile, "msg", msg)
+		d.processCameraPayload(c, payload)
 	}
+}
+
+func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
+	for len(payload) > 0 {
+		slog.Info("processing camera payload", "addr", c.conn.RemoteAddr())
+		switch payload[0] {
+		case msgTypes["want_heartbeat"]:
+			slog.Info("parsing camera heartbeat msg", "addr", c.conn.RemoteAddr())
+			msg := parseWantHeartbeatMsg(payload[1:])
+			slog.Debug("will send out a heartbeat", "addr", c.conn.RemoteAddr(), "msg", msg)
+			payload = payload[5:] // 1 - msg type + 4 - want_heartbeat
+		case msgTypes["plate"]:
+			slog.Info("parsing camera plate msg", "addr", c.conn.RemoteAddr())
+			msg, offset := parsePlateMsg(payload[1:])
+			slog.Info("parsed plate message", "road", c.road, "mile", c.mile, "msg", msg)
+			d.handlePlate(msg.plate, msg.timestamp, c.road, c.mile, c.limit)
+			payload = payload[offset+1:]
+		default:
+			slog.Info("invalid payload type", "addr", c.conn.RemoteAddr())
+			return fmt.Errorf("%b message type is invalid", payload[0])
+		}
+	}
+	return nil
 }
 
 /*
@@ -72,11 +106,11 @@ Algo:
     record the ticket to avoid issuing new ones
   - Otherwise, append the current record to said plate's array
 */
-func (d *daemon) handlePlate(plate string, ts uint32, road, mile uint16, limit int) {
+func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) {
+	d.recordsLock.Lock()
+	defer d.recordsLock.Unlock()
+
 	if _, ok := d.records[plate]; ok {
-		sortRecords := func(a, b record) int {
-			return int(a.timestamp - b.timestamp)
-		}
 		slices.SortFunc(d.records[plate], sortRecords)
 
 		records := d.records[plate]
@@ -91,7 +125,7 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile uint16, limit i
 				duration := float64(ts - prevRecord.timestamp)
 				distance := float64(mile - prevRecord.mile)
 
-				speed := int(math.Round(distance / duration))
+				speed := uint16(math.Round(distance/duration)) * 100 // as per the specification
 
 				if speed > limit {
 					newTicket := &ticket{
@@ -104,9 +138,16 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile uint16, limit i
 						sent:       false,
 					}
 
+					// TODO: check the latest issued ticket for that day
+
+					slog.Debug("Issued a new ticket", "ticket", newTicket)
+					d.ticketsLock.Lock()
 					d.tickets[plate] = append(d.tickets[plate], newTicket)
+					d.ticketsLock.Unlock()
 					go d.dispatchTicket(newTicket)
 				}
+
+				// Should we delete the previous timestamp and keep only the latest one?
 			}
 		}
 	} else {
@@ -133,6 +174,7 @@ func (d *daemon) dispatchTicket(t *ticket) {
 }
 
 func (d *daemon) addDispatcher(conn net.Conn, roads []uint16) {
+	slog.Info("handling new dispatcher", "addr", conn.RemoteAddr(), "roads", roads)
 	disp := newDispatcher(conn, roads)
 	d.dispatchers = append(d.dispatchers, disp)
 	go disp.watch()
@@ -190,6 +232,10 @@ type record struct {
 	timestamp uint32
 }
 
+func sortRecords(a, b record) int {
+	return int(a.timestamp - b.timestamp)
+}
+
 type ticket struct {
 	plate      string
 	timestamp1 uint32
@@ -201,14 +247,70 @@ type ticket struct {
 	sent       bool
 }
 
-func (t *ticket) Bytes() []byte {
-	res := fixedStrToBytes(t.plate)
+func parseTicket(input []byte) *ticket {
+	slog.Debug("parseTicket: start", "input", input)
+	offset := 1
+	plate := parseFixedStr(input, offset)
+	offset += len(plate) + 1
 
-	res = binary.BigEndian.AppendUint32(res, t.timestamp1)
-	res = binary.BigEndian.AppendUint16(res, t.mile1)
-	res = binary.BigEndian.AppendUint32(res, t.timestamp2)
-	res = binary.BigEndian.AppendUint16(res, t.mile2)
+	road := binary.BigEndian.Uint16(input[offset : offset+2])
+	slog.Debug("parseTicket: road", "input", input[offset:offset+2], "parsed", road)
+	offset += 2
+
+	mile1 := binary.BigEndian.Uint16(input[offset : offset+2])
+	slog.Debug("parseTicket: mile1", "input", input[offset:offset+2], "parsed", mile1)
+	offset += 2
+
+	ts1 := binary.BigEndian.Uint32(input[offset : offset+4])
+	slog.Debug("parseTicket: ts1", "input", input[offset:offset+4], "parsed", ts1)
+	offset += 4
+
+	mile2 := binary.BigEndian.Uint16(input[offset : offset+2])
+	slog.Debug("parseTicket: mile2", "input", input[offset:offset+2], "parsed", mile2)
+	offset += 2
+
+	ts2 := binary.BigEndian.Uint32(input[offset : offset+4])
+	slog.Debug("parseTicket: ts2", "input", input[offset:offset+4], "parsed", ts2)
+	offset += 4
+
+	speed := binary.BigEndian.Uint16(input[offset : offset+2])
+	slog.Debug("parseTicket: speed", "input", input[offset:offset+2], "parsed", speed)
+
+	return &ticket{
+		plate:      plate,
+		road:       road,
+		mile1:      mile1,
+		timestamp1: ts1,
+		mile2:      mile2,
+		timestamp2: ts2,
+		speed:      speed,
+	}
+}
+
+func (t *ticket) equal(input *ticket) bool {
+	plate := t.plate == input.plate
+	road := t.road == input.road
+	mile1 := t.mile1 == input.mile1
+	ts1 := t.timestamp1 == input.timestamp1
+	mile2 := t.mile2 == input.mile2
+	ts2 := t.timestamp2 == input.timestamp2
+	speed := t.speed == input.speed
+
+	slog.Info("ticket equal() results", "plate", plate,
+		"road", road, "mile1", mile1, "ts1", ts1, "mile2", mile2,
+		"ts2", ts2, "speed", speed)
+	return plate && road && mile1 && ts1 && mile2 && ts2 && speed
+}
+
+func (t *ticket) Bytes() []byte {
+	res := []byte{msgTypes["ticket"]}
+	res, _ = binary.Append(res, binary.BigEndian, fixedStrToBytes(t.plate))
+
 	res = binary.BigEndian.AppendUint16(res, t.road)
+	res = binary.BigEndian.AppendUint16(res, t.mile1)
+	res = binary.BigEndian.AppendUint32(res, t.timestamp1)
+	res = binary.BigEndian.AppendUint16(res, t.mile2)
+	res = binary.BigEndian.AppendUint32(res, t.timestamp2)
 	res = binary.BigEndian.AppendUint16(res, t.speed)
 
 	return res

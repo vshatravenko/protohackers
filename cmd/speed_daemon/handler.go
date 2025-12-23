@@ -12,9 +12,9 @@ func (d *daemon) handleConn(conn net.Conn, payload []byte) {
 	switch msgType {
 	case msgTypes["error"]:
 		slog.Debug("parsed error msg", "addr", conn.RemoteAddr(), "msg", parseErrorMsg(payload))
-	case msgTypes["plate"]:
-		msg := parsePlateMsg(payload)
-		slog.Debug("parsed plate msg", "addr", conn.RemoteAddr(), "msg", msg)
+	// case msgTypes["plate"]:
+	//	msg := parsePlateMsg(payload)
+	//	slog.Debug("parsed plate msg", "addr", conn.RemoteAddr(), "msg", msg)
 	case msgTypes["ticket"]: // this will never be sent initially
 		slog.Debug("parsing ticket msg")
 	case msgTypes["want_heartbeat"]: // ditto
@@ -23,12 +23,13 @@ func (d *daemon) handleConn(conn net.Conn, payload []byte) {
 	case msgTypes["heartbeat"]: // this is only sent by the server
 		slog.Debug("parsing heartbeat msg")
 	case msgTypes["camera"]:
-		msg := parseCameraMsg(payload)
-		d.addCamera(conn, msg.road, msg.mile, msg.limit)
-		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr(), "msg", msg)
+		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr())
+		d.handleCamera(conn, payload[1:])
 	case msgTypes["dispatcher"]:
 		msg := parseDispatcherMsg(payload)
 		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)
 		d.addDispatcher(conn, msg.roads)
+	default:
+		slog.Info("received unknown msg", "payload", payload)
 	}
 }
