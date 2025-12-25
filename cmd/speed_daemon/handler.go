@@ -7,7 +7,6 @@ import (
 
 func (d *daemon) handleConn(conn net.Conn, payload []byte) {
 	msgType := uint8(payload[0])
-	payload = payload[1:]
 
 	switch msgType {
 	case msgTypes["error"]:
@@ -24,7 +23,7 @@ func (d *daemon) handleConn(conn net.Conn, payload []byte) {
 		slog.Debug("parsing heartbeat msg")
 	case msgTypes["camera"]:
 		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr())
-		d.handleCamera(conn, payload[1:])
+		d.handleCamera(conn, payload)
 	case msgTypes["dispatcher"]:
 		msg := parseDispatcherMsg(payload)
 		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)

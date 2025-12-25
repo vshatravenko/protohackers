@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,11 +32,12 @@ var (
 	}
 	testDispatcher1Init = iAmDispatcherMsg{
 		numRoads: 2,
-		roads:    []uint16{123, 256},
+		roads:    []uint16{123, 224},
 	}
-	testDispatcher1Tickets = []*ticketMsg{
+	testDispatcher1Tickets = []*ticket{
 		{plate: "UN1X", road: 123, mile1: 8, timestamp1: 0, mile2: 9, timestamp2: 45, speed: 8000},
 	}
+	testTimeout = 5 * time.Second
 )
 
 /*
@@ -50,8 +52,24 @@ func TestDaemon(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	go runTestCamera(t, testCamera1Init, testCamera1Plates)
 	go runTestCamera(t, testCamera2Init, testCamera2Plates)
-	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Tickets)
-	time.Sleep(60 * time.Second)
+	wg := new(sync.WaitGroup)
+	wg.Add(len(testDispatcher1Tickets))
+	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Tickets, wg)
+
+	done := make(chan int)
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("Test completed successfully on time")
+		return
+	case <-time.After(testTimeout):
+		t.Errorf("The test didn't complete after 15 seconds")
+		break
+	}
 }
 
 func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
@@ -75,7 +93,6 @@ func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
 			t.Errorf("test camera failed to send the plate message, id: %s, err: %s, plate: %v", id, err.Error(), plate)
 			return
 		}
-
 	}
 
 	// Keep the connection open
@@ -83,7 +100,7 @@ func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
 	_, _ = conn.Read(b)
 }
 
-func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets []*ticketMsg) {
+func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets []*ticket, wg *sync.WaitGroup) {
 	id := fmt.Sprintf("#%d-%d", initMsg.roads[0], initMsg.numRoads)
 	slog.Info("test dispatcher dialing", "id", id)
 	conn, err := net.DialTCP("tcp4", nil, serverAddr)
@@ -113,15 +130,16 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets [
 		switch msgType {
 		case msgTypes["ticket"]:
 			slog.Info("test dispatcher received ticket msg", "id", id)
-			actual := parseTicketMsg(payload[1:])
+			actual := parseTicket(payload)
 			slog.Info("test dispatcher parsed ticket msg", "id", id, "ticket", actual)
 			expected := expectedTickets[0]
 			expectedTickets = expectedTickets[1:]
-			if isEqualTicket(expected, actual) {
+			if expected.equal(actual) {
 				slog.Info("ticket equality check passed", "id", id, "ticket", actual)
 			} else {
 				t.Errorf("ticket equality check failed:\nactual:%v\nexpected: %v", actual, expected)
 			}
+			wg.Done()
 
 		case msgTypes["heartbeat"]:
 			slog.Info("test dispatcher received heartbeat", "id", id)
@@ -131,16 +149,17 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets [
 
 }
 
-func isEqualTicket(expected, actual *ticketMsg) bool {
-	plate := expected.plate == actual.plate
-	road := expected.road == actual.road
-	mile1 := expected.mile1 == actual.mile1
-	ts1 := expected.timestamp1 == actual.timestamp1
-	mile2 := expected.mile2 == actual.mile2
-	ts2 := expected.timestamp2 == actual.timestamp2
-	speed := expected.speed == actual.speed
+func TestSpeed(t *testing.T) {
+	const (
+		mile1    = 8
+		mile2    = 9
+		ts1      = 0
+		ts2      = 45
+		expected = 8000
+	)
 
-	slog.Info("isEqualTicket results", "plate", plate, "road", road, "mile1", mile1, "ts1", ts1, "mile2", mile2, "ts2", ts2, "speed", speed)
-
-	return plate && road && mile1 && ts1 && mile2 && ts2 && speed
+	actual := calculateSpeed(mile1, mile2, ts1, ts2)
+	if actual != expected {
+		t.Errorf("Speed:\nexpected: %d\nactual: %d", expected, actual)
+	}
 }

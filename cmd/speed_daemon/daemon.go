@@ -14,7 +14,7 @@ import (
 
 type daemon struct {
 	dispatchers []*dispatcher
-	records     map[string][]record
+	records     map[string][]*record
 	recordsLock *sync.RWMutex
 	tickets     map[string][]*ticket
 	ticketsLock *sync.RWMutex
@@ -24,7 +24,7 @@ type daemon struct {
 func newDaemon() *daemon {
 	return &daemon{
 		dispatchers: make([]*dispatcher, 0),
-		records:     make(map[string][]record),
+		records:     make(map[string][]*record),
 		recordsLock: new(sync.RWMutex),
 		tickets:     make(map[string][]*ticket),
 		ticketsLock: new(sync.RWMutex),
@@ -49,19 +49,24 @@ func (d *daemon) handleHeartbeat() {
 // Should we add a camera and create new goroutines tracked by a waitgroup
 // or simply use the existing process to keep the connection loop?
 func (d *daemon) handleCamera(conn net.Conn, initPayload []byte) {
-	slog.Info("handling new camera", "addr", conn.RemoteAddr(), "payload", initPayload)
+	slog.Info("handling new camera", "addr", conn.RemoteAddr())
 	cMsg := parseCameraMsg(initPayload)
 	c := &camera{conn: conn, road: cMsg.road, mile: cMsg.mile, limit: cMsg.limit}
 	slog.Info("parsed new camera", "addr", conn.RemoteAddr(), "camera", c)
 	defer closeConn(conn)
 
-	// the length of iAmCamera msg is 6
-	initPayload = initPayload[6:]
+	// the length of iAmCamera msg is 7(msg type byte + 3 uint16 fields)
+	initPayload = initPayload[7:]
 
 	if len(initPayload) > 0 {
-		d.processCameraPayload(c, initPayload)
+		slog.Debug("handling init camera payload", "addr", conn.RemoteAddr())
+		if err := d.processCameraPayload(c, initPayload); err != nil {
+			slog.Warn("failed to process init camera payload", "addr", conn.RemoteAddr(), "err", err.Error())
+			return
+		}
 	}
 
+	slog.Debug("waiting for a new camera payload", "addr", conn.RemoteAddr())
 	for {
 		b := make([]byte, bufSize)
 		n, err := c.conn.Read(b)
@@ -71,25 +76,28 @@ func (d *daemon) handleCamera(conn net.Conn, initPayload []byte) {
 		}
 
 		payload := b[:n]
-		d.processCameraPayload(c, payload)
+		if err := d.processCameraPayload(c, payload); err != nil {
+			slog.Warn("failed to process camera payload", "addr", conn.RemoteAddr(), "err", err.Error())
+			return
+		}
 	}
 }
 
 func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
 	for len(payload) > 0 {
-		slog.Info("processing camera payload", "addr", c.conn.RemoteAddr())
+		slog.Info("processing camera payload", "addr", c.conn.RemoteAddr(), "length", len(payload))
 		switch payload[0] {
 		case msgTypes["want_heartbeat"]:
 			slog.Info("parsing camera heartbeat msg", "addr", c.conn.RemoteAddr())
-			msg := parseWantHeartbeatMsg(payload[1:])
+			msg := parseWantHeartbeatMsg(payload)
 			slog.Debug("will send out a heartbeat", "addr", c.conn.RemoteAddr(), "msg", msg)
 			payload = payload[5:] // 1 - msg type + 4 - want_heartbeat
 		case msgTypes["plate"]:
 			slog.Info("parsing camera plate msg", "addr", c.conn.RemoteAddr())
-			msg, offset := parsePlateMsg(payload[1:])
+			msg, offset := parsePlateMsg(payload)
 			slog.Info("parsed plate message", "road", c.road, "mile", c.mile, "msg", msg)
 			d.handlePlate(msg.plate, msg.timestamp, c.road, c.mile, c.limit)
-			payload = payload[offset+1:]
+			payload = payload[offset:]
 		default:
 			slog.Info("invalid payload type", "addr", c.conn.RemoteAddr())
 			return fmt.Errorf("%b message type is invalid", payload[0])
@@ -110,33 +118,53 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 	d.recordsLock.Lock()
 	defer d.recordsLock.Unlock()
 
-	if _, ok := d.records[plate]; ok {
-		slices.SortFunc(d.records[plate], sortRecords)
+	_, exists := d.records[plate]
 
-		records := d.records[plate]
-		for i := 0; i < len(d.records[plate]); i++ {
+	curRecord := &record{plate: plate, mile: mile, timestamp: ts}
+	slog.Debug("inserting record for plate", "plate", plate, "record", curRecord)
+	d.records[plate] = append(d.records[plate], curRecord)
+
+	if exists {
+		slog.Debug("found existing records, checking for speed limit", "plate", plate)
+		records := filterRecordsByPlate(d.records[plate], plate)
+		slices.SortFunc(records, sortRecords)
+
+		for i := range len(records) {
+			var prevRecord *record
 			if records[i].timestamp == ts {
+				// TODO: we may need to retroactively check for speed violations
+				// in case earlier tickets come in the future
 				if i == 0 {
-					return
+					slog.Debug("this is the earliest record, comparing to the future one", "plate", plate, "timestamp", ts)
+					prevRecord = curRecord
+					curRecord = records[i+1]
+				} else {
+					prevRecord = records[i-1]
+					slog.Debug("found previous chronological record", "plate", plate, "record", *prevRecord)
 				}
 
-				prevRecord := records[i-1]
+				speed := calculateSpeed(prevRecord.mile, curRecord.mile, prevRecord.timestamp, curRecord.timestamp)
+				slog.Debug("calculated speed",
+					"mile1", prevRecord.mile, "mile2", curRecord.mile,
+					"ts1", prevRecord.timestamp, "ts2", curRecord.timestamp,
+					"speed", speed,
+				)
 
-				duration := float64(ts - prevRecord.timestamp)
-				distance := float64(mile - prevRecord.mile)
+				mph := uint16(math.Round(float64(speed) / 100))
+				slog.Info("converted speed to mph", "speed", speed, "mph", mph)
 
-				speed := uint16(math.Round(distance/duration)) * 100 // as per the specification
-
-				if speed > limit {
+				if mph > limit {
 					newTicket := &ticket{
 						plate:      plate,
 						timestamp1: prevRecord.timestamp,
 						mile1:      prevRecord.mile,
-						timestamp2: ts,
-						mile2:      mile,
+						timestamp2: curRecord.timestamp,
+						mile2:      curRecord.mile,
 						road:       road,
+						speed:      speed,
 						sent:       false,
 					}
+					slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
 
 					// TODO: check the latest issued ticket for that day
 
@@ -144,20 +172,19 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 					d.ticketsLock.Lock()
 					d.tickets[plate] = append(d.tickets[plate], newTicket)
 					d.ticketsLock.Unlock()
+					// TODO: put this into a channel that can be re-enqueued after a timeout
+					// if there are no dispatchers available or if the transfer fails
 					go d.dispatchTicket(newTicket)
 				}
-
 				// Should we delete the previous timestamp and keep only the latest one?
 			}
 		}
-	} else {
-		newRecord := record{plate: plate, mile: mile, timestamp: ts}
-		d.records[plate] = append(d.records[plate], newRecord)
 	}
 }
 
 // TODO: handle cases when the target dispatcher is not available
 func (d *daemon) dispatchTicket(t *ticket) {
+	slog.Debug("looking for dispatchers", "timestamp", t.timestamp2)
 	for _, disp := range d.dispatchers {
 		for _, r := range disp.roads {
 			if r == t.road {
@@ -232,8 +259,14 @@ type record struct {
 	timestamp uint32
 }
 
-func sortRecords(a, b record) int {
-	return int(a.timestamp - b.timestamp)
+func sortRecords(a, b *record) int {
+	if a.timestamp > b.timestamp {
+		return 1
+	} else if a.timestamp < b.timestamp {
+		return -1
+	} else {
+		return 0
+	}
 }
 
 type ticket struct {
@@ -248,33 +281,26 @@ type ticket struct {
 }
 
 func parseTicket(input []byte) *ticket {
-	slog.Debug("parseTicket: start", "input", input)
 	offset := 1
 	plate := parseFixedStr(input, offset)
 	offset += len(plate) + 1
 
 	road := binary.BigEndian.Uint16(input[offset : offset+2])
-	slog.Debug("parseTicket: road", "input", input[offset:offset+2], "parsed", road)
 	offset += 2
 
 	mile1 := binary.BigEndian.Uint16(input[offset : offset+2])
-	slog.Debug("parseTicket: mile1", "input", input[offset:offset+2], "parsed", mile1)
 	offset += 2
 
 	ts1 := binary.BigEndian.Uint32(input[offset : offset+4])
-	slog.Debug("parseTicket: ts1", "input", input[offset:offset+4], "parsed", ts1)
 	offset += 4
 
 	mile2 := binary.BigEndian.Uint16(input[offset : offset+2])
-	slog.Debug("parseTicket: mile2", "input", input[offset:offset+2], "parsed", mile2)
 	offset += 2
 
 	ts2 := binary.BigEndian.Uint32(input[offset : offset+4])
-	slog.Debug("parseTicket: ts2", "input", input[offset:offset+4], "parsed", ts2)
 	offset += 4
 
 	speed := binary.BigEndian.Uint16(input[offset : offset+2])
-	slog.Debug("parseTicket: speed", "input", input[offset:offset+2], "parsed", speed)
 
 	return &ticket{
 		plate:      plate,
@@ -320,4 +346,33 @@ func closeConn(conn net.Conn) {
 	if err := conn.Close(); err != nil {
 		slog.Info("could not close conn", "addr", conn.RemoteAddr(), "err", err.Error())
 	}
+}
+
+func filterRecordsByPlate(records []*record, plate string) []*record {
+	res := []*record{}
+
+	for _, rec := range records {
+		if rec.plate == plate {
+			res = append(res, rec)
+		}
+	}
+
+	return res
+}
+
+func calculateSpeed(mile1, mile2 uint16, ts1, ts2 uint32) uint16 {
+	duration := float64(ts2 - ts1)
+	distance := float64(mile2 - mile1)
+	mph := distance * 3600 / duration
+	speed := uint16(mph * 100) // 100x as per the specification
+
+	return speed
+}
+
+func prettyPrintRecords(records []*record) string {
+	res := ""
+	for _, r := range records {
+		res += fmt.Sprintf("%+v ", *r)
+	}
+	return res
 }
