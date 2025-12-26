@@ -30,6 +30,9 @@ var (
 		timestamp2: 45,
 		speed:      8000,
 	}
+	whm = wantHeartbeatMsg{
+		interval: 25,
+	}
 )
 
 func TestMsgEncodingParsing(t *testing.T) {
@@ -63,4 +66,11 @@ func TestMsgEncodingParsing(t *testing.T) {
 	if !expectedTicket.equal(parsedTicket) {
 		t.Errorf("ticket:\nexpected: %+v\nactual: %+v", expectedTicket, *parsedTicket)
 	}
+
+	b = whm.Bytes()
+	parsedWHM := parseWantHeartbeatMsg(b)
+	if !whm.equal(parsedWHM) {
+		t.Errorf("want_heartbeat:\nexpected: %+v\nactual: %+v", whm, *parsedWHM)
+	}
+
 }

@@ -16,7 +16,6 @@ func main() {
 	logger.ConfigureDefaultLoggerFromEnv()
 
 	d := newDaemon()
-	go d.handleHeartbeat()
 
 	srv, err := server.NewTCPServerFromEnv(handler(d))
 	if err != nil {
@@ -42,10 +41,7 @@ TODO:
 func handler(d *daemon) func(net.Conn) {
 	return func(conn net.Conn) {
 		defer func() {
-			err := conn.Close()
-			if err != nil {
-				slog.Info("conn close failed", "addr", conn.RemoteAddr(), "err", err.Error())
-			}
+			_ = conn.Close()
 		}()
 
 		b := make([]byte, bufSize)

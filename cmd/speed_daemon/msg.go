@@ -29,6 +29,15 @@ func parseErrorMsg(input []byte) *errorMsg {
 	return &errorMsg{msg}
 }
 
+func (e *errorMsg) Bytes() []byte {
+	res := []byte{}
+	res, _ = binary.Append(res, binary.BigEndian, msgTypes["error"])
+	msgBytes := fixedStrToBytes(e.msg)
+	res, _ = binary.Append(res, binary.BigEndian, msgBytes)
+
+	return res
+}
+
 type plateMsg struct {
 	plate     string
 	timestamp uint32
@@ -71,17 +80,21 @@ type wantHeartbeatMsg struct {
 	interval uint32 // deciseconds, 25 == 2.5 seconds
 }
 
+func parseWantHeartbeatMsg(input []byte) *wantHeartbeatMsg {
+	interval := binary.BigEndian.Uint32(input[1:])
+
+	return &wantHeartbeatMsg{interval: interval}
+}
+
 func (whm *wantHeartbeatMsg) Bytes() []byte {
 	res := []byte{msgTypes["want_heartbeat"]}
-	binary.BigEndian.AppendUint32(res, whm.interval)
+	res = binary.BigEndian.AppendUint32(res, whm.interval)
 
 	return res
 }
 
-func parseWantHeartbeatMsg(input []byte) wantHeartbeatMsg {
-	interval := binary.BigEndian.Uint32(input)
-
-	return wantHeartbeatMsg{interval: interval}
+func (whm *wantHeartbeatMsg) equal(input *wantHeartbeatMsg) bool {
+	return whm.interval == input.interval
 }
 
 type heartbeatMsg uint8

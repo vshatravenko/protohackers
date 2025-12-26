@@ -89,7 +89,7 @@ func (ts *TCPServer) Start() error {
 			continue
 		}
 
-		slog.Info("Handling conn", "addr", conn.RemoteAddr())
+		slog.Info("new conn", "addr", conn.RemoteAddr())
 		go ts.handler(conn)
 	}
 }

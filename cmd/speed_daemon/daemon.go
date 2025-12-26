@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,49 +14,100 @@ import (
 	"time"
 )
 
+var (
+	errExistingHeartbeat = errors.New("there is an existing heartbeat")
+	errIncorrectMsgType  = errors.New("incorrect message type")
+)
+
 type daemon struct {
 	dispatchers []*dispatcher
+	dispLock    *sync.RWMutex
 	records     map[string][]*record
 	recordsLock *sync.RWMutex
 	tickets     map[string]map[string]*ticket
 	ticketsLock *sync.RWMutex
-	heartbeat   chan *net.TCPConn
+	heartbeats  map[*net.TCPConn]chan int
+	hbLock      *sync.RWMutex
 }
 
 func newDaemon() *daemon {
 	return &daemon{
 		dispatchers: make([]*dispatcher, 0),
+		dispLock:    new(sync.RWMutex),
 		records:     make(map[string][]*record),
 		recordsLock: new(sync.RWMutex),
 		tickets:     make(map[string]map[string]*ticket),
 		ticketsLock: new(sync.RWMutex),
+		heartbeats:  make(map[*net.TCPConn]chan int),
+		hbLock:      new(sync.RWMutex),
 	}
 }
 
-// TODO: complete the periodic heartbeat implementation
-func (d *daemon) handleHeartbeat() {
+func (d *daemon) handleConn(c net.Conn, payload []byte) {
+	msgType := uint8(payload[0])
+
+	conn := c.(*net.TCPConn)
+
+	switch msgType {
+	case msgTypes["camera"]:
+		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr())
+		d.handleCamera(conn, payload)
+	case msgTypes["dispatcher"]:
+		msg := parseDispatcherMsg(payload)
+		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)
+		d.handleDispatcher(conn, msg.roads)
+	default:
+		slog.Info("received unexpected message type", "type", fmt.Sprintf("0x%X", msgType))
+		sendErrMsg(conn, errIncorrectMsgType.Error())
+		_ = conn.Close()
+	}
+}
+
+func (d *daemon) handleWantHeartbeat(conn *net.TCPConn, payload []byte) error {
+	msg := parseWantHeartbeatMsg(payload)
+	interval := time.Duration(msg.interval) * time.Millisecond * 100
+
+	d.hbLock.Lock()
+	defer d.hbLock.Unlock()
+
+	if _, ok := d.heartbeats[conn]; ok {
+		slog.Debug("detected conn with existing heartbeat, aborting", "addr", conn.RemoteAddr(), "heartbeats", d.heartbeats)
+		return errExistingHeartbeat
+	}
+	d.heartbeats[conn] = make(chan int)
+
+	slog.Debug("will start sending out heartbeats", "addr", conn.RemoteAddr(), "interval", interval)
+	go sendHeartbeat(conn, interval, d.heartbeats[conn])
+
+	return nil
+}
+
+func sendHeartbeat(conn *net.TCPConn, interval time.Duration, done chan int) {
 	for {
 		select {
-		case conn := <-d.heartbeat:
+		case <-done:
+			slog.Debug("finished sending heartbeats")
+			return
+		default:
+			slog.Debug("sending heartbeat", "addr", conn.RemoteAddr())
 			msg := new(heartbeatMsg)
 			_, err := conn.Write(msg.Bytes())
 			if err != nil {
 				slog.Warn("failed to send a heartbeat to conn", "addr", conn.RemoteAddr(), "err", err.Error())
+				return
 			}
-		default:
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(interval)
 		}
 	}
 }
 
-// Should we add a camera and create new goroutines tracked by a waitgroup
-// or simply use the existing process to keep the connection loop?
 func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 	slog.Info("handling new camera", "addr", conn.RemoteAddr())
 	cMsg := parseCameraMsg(initPayload)
 	c := &camera{conn: conn, road: cMsg.road, mile: cMsg.mile, limit: cMsg.limit}
 	slog.Info("parsed new camera", "addr", conn.RemoteAddr(), "camera", c)
 	defer closeConn(conn)
+	defer d.stopHeartbeat(conn)
 
 	// the length of iAmCamera msg is 7(msg type byte + 3 uint16 fields)
 	initPayload = initPayload[7:]
@@ -74,12 +126,16 @@ func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 		n, err := c.conn.Read(b)
 		if err != nil && err != io.EOF {
 			slog.Warn("failed to read from camera conn", "road", c.road, "mile", c.mile, "err", err.Error())
+			errMsg := &errorMsg{msg: err.Error()}
+			_, _ = c.conn.Write(errMsg.Bytes())
 			return
 		}
 
 		payload := b[:n]
 		if err := d.processCameraPayload(c, payload); err != nil {
 			slog.Warn("failed to process camera payload", "addr", conn.RemoteAddr(), "err", err.Error())
+			errMsg := &errorMsg{msg: err.Error()}
+			_, _ = c.conn.Write(errMsg.Bytes())
 			return
 		}
 	}
@@ -90,10 +146,11 @@ func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
 		slog.Info("processing camera payload", "addr", c.conn.RemoteAddr(), "length", len(payload))
 		switch payload[0] {
 		case msgTypes["want_heartbeat"]:
-			slog.Info("parsing camera heartbeat msg", "addr", c.conn.RemoteAddr())
-			msg := parseWantHeartbeatMsg(payload)
-			slog.Debug("will send out a heartbeat", "addr", c.conn.RemoteAddr(), "msg", msg)
-			d.heartbeat <- c.conn
+			slog.Info("handling camera heartbeat msg", "addr", c.conn.RemoteAddr())
+			if err := d.handleWantHeartbeat(c.conn, payload); err != nil {
+				return err
+			}
+			payload = payload[5:] // msg type byte + uint32 (4 bytes)
 		case msgTypes["plate"]:
 			slog.Info("parsing camera plate msg", "addr", c.conn.RemoteAddr())
 			msg, offset := parsePlateMsg(payload)
@@ -208,34 +265,73 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 func (d *daemon) dispatchTicket(t *ticket) {
 	slog.Debug("looking for dispatchers", "timestamp", t.timestamp2)
 	for _, disp := range d.dispatchers {
-		for _, r := range disp.roads {
-			if r == t.road {
-				payload := t.Bytes()
-				_, err := disp.conn.Write(payload)
-				if err == nil {
-					t.sent = true
-				} else {
-					slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
-				}
+		if slices.Contains(disp.roads, t.road) {
+			payload := t.Bytes()
+			if _, err := disp.conn.Write(payload); err != nil {
+				slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
+			} else {
+				t.sent = true
 			}
+
+			return
 		}
 	}
 }
 
-func (d *daemon) addDispatcher(conn *net.TCPConn, roads []uint16) {
+func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {
 	slog.Info("handling new dispatcher", "addr", conn.RemoteAddr(), "roads", roads)
 	disp := newDispatcher(conn, roads)
 	d.dispatchers = append(d.dispatchers, disp)
 	go disp.watch()
+	defer d.removeDispatcher(disp)
+	defer d.stopHeartbeat(disp.conn)
 
 	for {
 		b := make([]byte, bufSize)
-		_, err := disp.conn.Read(b)
+		n, err := disp.conn.Read(b)
 		if err != nil && err != io.EOF {
 			slog.Warn("failed to read from disp conn", "addr", disp.conn.RemoteAddr, "err", err.Error())
-			disp.kill <- 1
 			return
 		}
+
+		payload := b[:n]
+		msgType := payload[0]
+		if msgType != msgTypes["want_heartbeat"] {
+			slog.Warn("unexpected msgType from dispatcher, aborting", "addr", disp.conn.RemoteAddr(), "type", msgType)
+			return
+		}
+
+		slog.Info("handling dispatcher heartbeat msg", "addr", disp.conn.RemoteAddr())
+		if err := d.handleWantHeartbeat(disp.conn, payload); err != nil {
+			errMsg := &errorMsg{msg: err.Error()}
+			_, _ = disp.conn.Write(errMsg.Bytes())
+			return
+		}
+	}
+}
+
+func (d *daemon) removeDispatcher(disp *dispatcher) {
+	slog.Info("removing dispatcher", "addr", disp.conn.RemoteAddr(), "dispatcher", *disp)
+	disp.kill <- 1
+	_ = disp.conn.Close()
+	deleteFunc := func(a *dispatcher) bool {
+		return a == disp
+	}
+	d.dispLock.Lock()
+	defer d.dispLock.Unlock()
+	d.dispatchers = slices.DeleteFunc(d.dispatchers, deleteFunc)
+}
+
+func (d *daemon) stopHeartbeat(conn *net.TCPConn) {
+	d.hbLock.Lock()
+	defer d.hbLock.Unlock()
+
+	slog.Info("stopping heartbeat", "addr", conn.RemoteAddr())
+	done, ok := d.heartbeats[conn]
+	if ok {
+		close(done)
+	} else {
+		slog.Info("heartbeat already stopped", "addr", conn.RemoteAddr())
 	}
 }
 
@@ -398,4 +494,9 @@ func prettyPrintRecords(records []*record) string {
 	}
 
 	return builder.String()
+}
+
+func sendErrMsg(conn *net.TCPConn, msg string) {
+	errMsg := &errorMsg{msg: msg}
+	_, _ = conn.Write(errMsg.Bytes())
 }

@@ -19,6 +19,9 @@ var (
 		mile:  8,
 		limit: 60,
 	}
+	testCamera1Hb = wantHeartbeatMsg{
+		interval: 10, // 1 second
+	}
 	testCamera1Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 0},
 		{plate: "UN1X", timestamp: 100},
@@ -28,6 +31,9 @@ var (
 		mile:  9,
 		limit: 60,
 	}
+	testCamera2Hb = wantHeartbeatMsg{
+		interval: 25, // 2.5 seconds
+	}
 	testCamera2Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 45},
 		{plate: "UN1X", timestamp: 145},
@@ -35,6 +41,9 @@ var (
 	testDispatcher1Init = iAmDispatcherMsg{
 		numRoads: 2,
 		roads:    []uint16{123, 224},
+	}
+	testDispatcher1Hb = wantHeartbeatMsg{
+		interval: 30, // 3 seconds
 	}
 	testDispatcher1Tickets = []*ticket{
 		{plate: "UN1X", road: 123, mile1: 8, timestamp1: 0, mile2: 9, timestamp2: 45, speed: 8000},
@@ -52,11 +61,11 @@ func TestDaemon(t *testing.T) {
 	// TODO: add a wait group for each component to stop as soon as the test is completed
 	go main()
 	time.Sleep(1 * time.Second)
-	go runTestCamera(t, testCamera1Init, testCamera1Plates)
-	go runTestCamera(t, testCamera2Init, testCamera2Plates)
+	go runTestCamera(t, testCamera1Init, testCamera1Hb, testCamera1Plates)
+	go runTestCamera(t, testCamera2Init, testCamera2Hb, testCamera2Plates)
 	wg := new(sync.WaitGroup)
 	wg.Add(len(testDispatcher1Tickets))
-	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Tickets, wg)
+	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Hb, testDispatcher1Tickets, wg)
 
 	done := make(chan int)
 	go func() {
@@ -74,7 +83,7 @@ func TestDaemon(t *testing.T) {
 	}
 }
 
-func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
+func runTestCamera(t *testing.T, initMsg iAmCameraMsg, hbMsg wantHeartbeatMsg, plates []plateMsg) {
 	id := fmt.Sprintf("#%d-%d", initMsg.road, initMsg.mile)
 	slog.Info("test camera dialing", "id", id)
 	conn, err := net.DialTCP("tcp4", nil, serverAddr)
@@ -88,12 +97,17 @@ func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
 		t.Errorf("test camera failed to send the init message, id: %s, err: %s", id, err.Error())
 	}
 
+	slog.Info("test camera sending want_heartbeat msg", "id", id)
+	_, err = conn.Write(hbMsg.Bytes())
+	if err != nil {
+		t.Errorf("test camera failed to send want_heartbeat msg, id: %s, err: %s", id, err.Error())
+	}
+
 	for _, plate := range plates {
 		slog.Info("test camera sending plate msg", "id", id, "msg", plate, "payload", plate.Bytes())
 		_, err = conn.Write(plate.Bytes())
 		if err != nil {
 			t.Errorf("test camera failed to send the plate message, id: %s, err: %s, plate: %v", id, err.Error(), plate)
-			return
 		}
 	}
 
@@ -102,7 +116,7 @@ func runTestCamera(t *testing.T, initMsg iAmCameraMsg, plates []plateMsg) {
 	_, _ = conn.Read(b)
 }
 
-func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets []*ticket, wg *sync.WaitGroup) {
+func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, hbMsg wantHeartbeatMsg, expectedTickets []*ticket, wg *sync.WaitGroup) {
 	id := fmt.Sprintf("#%d-%d", initMsg.roads[0], initMsg.numRoads)
 	slog.Info("test dispatcher dialing", "id", id)
 	conn, err := net.DialTCP("tcp4", nil, serverAddr)
@@ -115,6 +129,12 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets [
 	_, err = conn.Write(initMsg.Bytes())
 	if err != nil {
 		t.Errorf("test dispatcher failed to send init msg, id: %s, err: %s", id, err.Error())
+	}
+
+	slog.Info("test dispatcher sending want_heartbeat msg", "id", id)
+	_, err = conn.Write(hbMsg.Bytes())
+	if err != nil {
+		t.Errorf("test dispatcher failed to send want_heartbeat msg, id: %s, err: %s", id, err.Error())
 	}
 
 	slog.Info("test dispatcher listening for messages", "id", id)
@@ -145,6 +165,8 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, expectedTickets [
 
 		case msgTypes["heartbeat"]:
 			slog.Info("test dispatcher received heartbeat", "id", id)
+		default:
+			t.Errorf("test dispatcher %s received unexpected msg type - 0x%X", id, msgType)
 		}
 
 	}
