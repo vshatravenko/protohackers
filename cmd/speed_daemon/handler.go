@@ -5,8 +5,10 @@ import (
 	"net"
 )
 
-func (d *daemon) handleConn(conn net.Conn, payload []byte) {
+func (d *daemon) handleConn(c net.Conn, payload []byte) {
 	msgType := uint8(payload[0])
+
+	conn := c.(*net.TCPConn)
 
 	switch msgType {
 	case msgTypes["error"]:

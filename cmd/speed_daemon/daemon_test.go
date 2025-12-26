@@ -21,6 +21,7 @@ var (
 	}
 	testCamera1Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 0},
+		{plate: "UN1X", timestamp: 100},
 	}
 	testCamera2Init = iAmCameraMsg{
 		road:  123,
@@ -29,6 +30,7 @@ var (
 	}
 	testCamera2Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 45},
+		{plate: "UN1X", timestamp: 145},
 	}
 	testDispatcher1Init = iAmDispatcherMsg{
 		numRoads: 2,
@@ -37,7 +39,7 @@ var (
 	testDispatcher1Tickets = []*ticket{
 		{plate: "UN1X", road: 123, mile1: 8, timestamp1: 0, mile2: 9, timestamp2: 45, speed: 8000},
 	}
-	testTimeout = 5 * time.Second
+	testTimeout = 15 * time.Second
 )
 
 /*

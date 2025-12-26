@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,7 +17,7 @@ type daemon struct {
 	dispatchers []*dispatcher
 	records     map[string][]*record
 	recordsLock *sync.RWMutex
-	tickets     map[string][]*ticket
+	tickets     map[string]map[string]*ticket
 	ticketsLock *sync.RWMutex
 	heartbeat   chan *net.TCPConn
 }
@@ -26,11 +27,12 @@ func newDaemon() *daemon {
 		dispatchers: make([]*dispatcher, 0),
 		records:     make(map[string][]*record),
 		recordsLock: new(sync.RWMutex),
-		tickets:     make(map[string][]*ticket),
+		tickets:     make(map[string]map[string]*ticket),
 		ticketsLock: new(sync.RWMutex),
 	}
 }
 
+// TODO: complete the periodic heartbeat implementation
 func (d *daemon) handleHeartbeat() {
 	for {
 		select {
@@ -48,7 +50,7 @@ func (d *daemon) handleHeartbeat() {
 
 // Should we add a camera and create new goroutines tracked by a waitgroup
 // or simply use the existing process to keep the connection loop?
-func (d *daemon) handleCamera(conn net.Conn, initPayload []byte) {
+func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 	slog.Info("handling new camera", "addr", conn.RemoteAddr())
 	cMsg := parseCameraMsg(initPayload)
 	c := &camera{conn: conn, road: cMsg.road, mile: cMsg.mile, limit: cMsg.limit}
@@ -91,7 +93,7 @@ func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
 			slog.Info("parsing camera heartbeat msg", "addr", c.conn.RemoteAddr())
 			msg := parseWantHeartbeatMsg(payload)
 			slog.Debug("will send out a heartbeat", "addr", c.conn.RemoteAddr(), "msg", msg)
-			payload = payload[5:] // 1 - msg type + 4 - want_heartbeat
+			d.heartbeat <- c.conn
 		case msgTypes["plate"]:
 			slog.Info("parsing camera plate msg", "addr", c.conn.RemoteAddr())
 			msg, offset := parsePlateMsg(payload)
@@ -116,68 +118,88 @@ Algo:
 */
 func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) {
 	d.recordsLock.Lock()
-	defer d.recordsLock.Unlock()
 
 	_, exists := d.records[plate]
 
 	curRecord := &record{plate: plate, mile: mile, timestamp: ts}
 	slog.Debug("inserting record for plate", "plate", plate, "record", curRecord)
 	d.records[plate] = append(d.records[plate], curRecord)
+	d.recordsLock.Unlock()
+
+	date := time.Unix(int64(curRecord.timestamp), 0).Format("02-01-2006") // FYI, we have to use these in Go instead of YYYY...
+	d.ticketsLock.RLock()
+	if _, ok := d.tickets[plate][date]; ok {
+		slog.Debug("found existing ticket for the current day, skipping speed limit check", "plate", plate, "date", date)
+		return
+	}
+	d.ticketsLock.RUnlock()
 
 	if exists {
 		slog.Debug("found existing records, checking for speed limit", "plate", plate)
+		d.recordsLock.RLock()
+		defer d.recordsLock.RUnlock()
 		records := filterRecordsByPlate(d.records[plate], plate)
 		slices.SortFunc(records, sortRecords)
 
+		var curPos int
 		for i := range len(records) {
-			var prevRecord *record
-			if records[i].timestamp == ts {
-				// TODO: we may need to retroactively check for speed violations
-				// in case earlier tickets come in the future
-				if i == 0 {
-					slog.Debug("this is the earliest record, comparing to the future one", "plate", plate, "timestamp", ts)
-					prevRecord = curRecord
-					curRecord = records[i+1]
-				} else {
-					prevRecord = records[i-1]
-					slog.Debug("found previous chronological record", "plate", plate, "record", *prevRecord)
-				}
-
-				speed := calculateSpeed(prevRecord.mile, curRecord.mile, prevRecord.timestamp, curRecord.timestamp)
-				slog.Debug("calculated speed",
-					"mile1", prevRecord.mile, "mile2", curRecord.mile,
-					"ts1", prevRecord.timestamp, "ts2", curRecord.timestamp,
-					"speed", speed,
-				)
-
-				mph := uint16(math.Round(float64(speed) / 100))
-				slog.Info("converted speed to mph", "speed", speed, "mph", mph)
-
-				if mph > limit {
-					newTicket := &ticket{
-						plate:      plate,
-						timestamp1: prevRecord.timestamp,
-						mile1:      prevRecord.mile,
-						timestamp2: curRecord.timestamp,
-						mile2:      curRecord.mile,
-						road:       road,
-						speed:      speed,
-						sent:       false,
-					}
-					slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
-
-					// TODO: check the latest issued ticket for that day
-
-					slog.Debug("Issued a new ticket", "ticket", newTicket)
-					d.ticketsLock.Lock()
-					d.tickets[plate] = append(d.tickets[plate], newTicket)
-					d.ticketsLock.Unlock()
-					// TODO: put this into a channel that can be re-enqueued after a timeout
-					// if there are no dispatchers available or if the transfer fails
-					go d.dispatchTicket(newTicket)
-				}
-				// Should we delete the previous timestamp and keep only the latest one?
+			if records[i].timestamp == curRecord.timestamp {
+				curPos = i
+				break
 			}
+		}
+
+		// TODO: we need to ensure that the previous record doesn't have the same mile
+		var prevRecord *record
+		// TODO: we may need to retroactively check for speed violations
+		// in case earlier tickets come in the future
+		if curPos == 0 {
+			slog.Debug("this is the earliest record, comparing to the future one", "plate", plate, "timestamp", ts)
+			prevRecord = curRecord
+			curRecord = records[curPos+1]
+		} else {
+			prevRecord = records[curPos-1]
+			slog.Debug("found previous chronological record", "plate", plate, "record", *prevRecord)
+		}
+
+		speed := calculateSpeed(prevRecord.mile, curRecord.mile, prevRecord.timestamp, curRecord.timestamp)
+		slog.Debug("calculated speed",
+			"mile1", prevRecord.mile, "mile2", curRecord.mile,
+			"ts1", prevRecord.timestamp, "ts2", curRecord.timestamp,
+			"speed", speed,
+		)
+
+		mph := uint16(math.Round(float64(speed) / 100))
+		slog.Info("converted speed to mph", "speed", speed, "mph", mph)
+
+		if mph > limit {
+			newTicket := &ticket{
+				plate:      plate,
+				timestamp1: prevRecord.timestamp,
+				mile1:      prevRecord.mile,
+				timestamp2: curRecord.timestamp,
+				mile2:      curRecord.mile,
+				road:       road,
+				speed:      speed,
+				sent:       false,
+			}
+			slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
+
+			// TODO: check the latest issued ticket for that day
+
+			slog.Debug("Issued a new ticket", "ticket", newTicket)
+			d.ticketsLock.Lock()
+			if _, ok := d.tickets[plate]; !ok {
+				d.tickets[plate] = make(map[string]*ticket)
+
+			}
+			d.tickets[plate][date] = newTicket
+			d.ticketsLock.Unlock()
+
+			// TODO: put this into a channel that can be re-enqueued after a timeout
+			// if there are no dispatchers available or if the transfer fails
+			go d.dispatchTicket(newTicket)
+			// Should we delete the previous timestamp and keep only the latest one?
 		}
 	}
 }
@@ -200,7 +222,7 @@ func (d *daemon) dispatchTicket(t *ticket) {
 	}
 }
 
-func (d *daemon) addDispatcher(conn net.Conn, roads []uint16) {
+func (d *daemon) addDispatcher(conn *net.TCPConn, roads []uint16) {
 	slog.Info("handling new dispatcher", "addr", conn.RemoteAddr(), "roads", roads)
 	disp := newDispatcher(conn, roads)
 	d.dispatchers = append(d.dispatchers, disp)
@@ -218,20 +240,20 @@ func (d *daemon) addDispatcher(conn net.Conn, roads []uint16) {
 }
 
 type camera struct {
-	conn  net.Conn
+	conn  *net.TCPConn
 	road  uint16
 	mile  uint16
 	limit uint16
 }
 
 type dispatcher struct {
-	conn  net.Conn
+	conn  *net.TCPConn
 	roads []uint16
 	comm  chan *ticket
 	kill  chan int
 }
 
-func newDispatcher(conn net.Conn, roads []uint16) *dispatcher {
+func newDispatcher(conn *net.TCPConn, roads []uint16) *dispatcher {
 	return &dispatcher{
 		conn:  conn,
 		roads: roads,
@@ -342,7 +364,7 @@ func (t *ticket) Bytes() []byte {
 	return res
 }
 
-func closeConn(conn net.Conn) {
+func closeConn(conn *net.TCPConn) {
 	if err := conn.Close(); err != nil {
 		slog.Info("could not close conn", "addr", conn.RemoteAddr(), "err", err.Error())
 	}
@@ -370,9 +392,10 @@ func calculateSpeed(mile1, mile2 uint16, ts1, ts2 uint32) uint16 {
 }
 
 func prettyPrintRecords(records []*record) string {
-	res := ""
+	builder := new(strings.Builder)
 	for _, r := range records {
-		res += fmt.Sprintf("%+v ", *r)
+		fmt.Fprintf(builder, "%+v ", *r)
 	}
-	return res
+
+	return builder.String()
 }

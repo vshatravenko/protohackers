@@ -21,6 +21,7 @@ func main() {
 	srv, err := server.NewTCPServerFromEnv(handler(d))
 	if err != nil {
 		slog.Error("Could not create TCPServer", "err", err.Error())
+
 	}
 
 	slog.Info("[speed_daemon] Listening for connections", "addr", srv.Addr)
