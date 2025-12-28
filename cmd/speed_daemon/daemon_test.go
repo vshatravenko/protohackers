@@ -32,7 +32,7 @@ var (
 		limit: 60,
 	}
 	testCamera2Hb = wantHeartbeatMsg{
-		interval: 25, // 2.5 seconds
+		interval: 0, // never
 	}
 	testCamera2Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 45},
@@ -65,6 +65,7 @@ func TestDaemon(t *testing.T) {
 	go runTestCamera(t, testCamera2Init, testCamera2Hb, testCamera2Plates)
 	wg := new(sync.WaitGroup)
 	wg.Add(len(testDispatcher1Tickets))
+	time.Sleep(time.Second) // simulate an unavailable dispatcher
 	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Hb, testDispatcher1Tickets, wg)
 
 	done := make(chan int)
@@ -91,16 +92,16 @@ func runTestCamera(t *testing.T, initMsg iAmCameraMsg, hbMsg wantHeartbeatMsg, p
 		t.Errorf("test camera failed to open connection, id: %s, err: %s", id, err.Error())
 	}
 
-	slog.Info("test camera sending init msg", "id", id)
-	_, err = conn.Write(initMsg.Bytes())
-	if err != nil {
-		t.Errorf("test camera failed to send the init message, id: %s, err: %s", id, err.Error())
-	}
-
 	slog.Info("test camera sending want_heartbeat msg", "id", id)
 	_, err = conn.Write(hbMsg.Bytes())
 	if err != nil {
 		t.Errorf("test camera failed to send want_heartbeat msg, id: %s, err: %s", id, err.Error())
+	}
+
+	slog.Info("test camera sending init msg", "id", id)
+	_, err = conn.Write(initMsg.Bytes())
+	if err != nil {
+		t.Errorf("test camera failed to send the init message, id: %s, err: %s", id, err.Error())
 	}
 
 	for _, plate := range plates {

@@ -14,32 +14,39 @@ import (
 	"time"
 )
 
+const (
+	ticketsToSendSize       = 20
+	ticketsToSendIntervalMS = 500
+)
+
 var (
 	errExistingHeartbeat = errors.New("there is an existing heartbeat")
 	errIncorrectMsgType  = errors.New("incorrect message type")
 )
 
 type daemon struct {
-	dispatchers []*dispatcher
-	dispLock    *sync.RWMutex
-	records     map[string][]*record
-	recordsLock *sync.RWMutex
-	tickets     map[string]map[string]*ticket
-	ticketsLock *sync.RWMutex
-	heartbeats  map[*net.TCPConn]chan int
-	hbLock      *sync.RWMutex
+	dispatchers   []*dispatcher
+	dispLock      *sync.RWMutex
+	records       map[string][]*record
+	recordsLock   *sync.RWMutex
+	tickets       map[string]map[string]*ticket
+	ticketsLock   *sync.RWMutex
+	ticketsToSend chan *ticket
+	heartbeats    map[*net.TCPConn]chan int
+	hbLock        *sync.RWMutex
 }
 
 func newDaemon() *daemon {
 	return &daemon{
-		dispatchers: make([]*dispatcher, 0),
-		dispLock:    new(sync.RWMutex),
-		records:     make(map[string][]*record),
-		recordsLock: new(sync.RWMutex),
-		tickets:     make(map[string]map[string]*ticket),
-		ticketsLock: new(sync.RWMutex),
-		heartbeats:  make(map[*net.TCPConn]chan int),
-		hbLock:      new(sync.RWMutex),
+		dispatchers:   make([]*dispatcher, 0),
+		dispLock:      new(sync.RWMutex),
+		records:       make(map[string][]*record),
+		recordsLock:   new(sync.RWMutex),
+		tickets:       make(map[string]map[string]*ticket),
+		ticketsLock:   new(sync.RWMutex),
+		ticketsToSend: make(chan *ticket, ticketsToSendSize),
+		heartbeats:    make(map[*net.TCPConn]chan int),
+		hbLock:        new(sync.RWMutex),
 	}
 }
 
@@ -56,6 +63,23 @@ func (d *daemon) handleConn(c net.Conn, payload []byte) {
 		msg := parseDispatcherMsg(payload)
 		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)
 		d.handleDispatcher(conn, msg.roads)
+	case msgTypes["want_heartbeat"]:
+		if err := d.handleWantHeartbeat(conn, payload); err != nil {
+			slog.Warn("failed to handle want_heartbeat, closing conn", "addr", conn.RemoteAddr())
+			sendErrMsg(conn, err.Error())
+			_ = conn.Close()
+		}
+		offset := 5 // msg type (1 byte) + interval (uint32 - 4 bytes)
+		if len(payload) > offset {
+			d.handleConn(conn, payload[offset:])
+		} else {
+			buf := make([]byte, bufSize)
+			n, err := conn.Read(buf)
+			if err != nil && err != io.EOF {
+				slog.Warn("failed to read from conn after want_heartbeat", "addr", conn.RemoteAddr(), "err", err.Error())
+			}
+			d.handleConn(conn, buf[:n])
+		}
 	default:
 		slog.Info("received unexpected message type", "type", fmt.Sprintf("0x%X", msgType))
 		sendErrMsg(conn, errIncorrectMsgType.Error())
@@ -77,7 +101,11 @@ func (d *daemon) handleWantHeartbeat(conn *net.TCPConn, payload []byte) error {
 	d.heartbeats[conn] = make(chan int)
 
 	slog.Debug("will start sending out heartbeats", "addr", conn.RemoteAddr(), "interval", interval)
-	go sendHeartbeat(conn, interval, d.heartbeats[conn])
+	if interval == 0 {
+		slog.Debug("detected a zero-interval want_heartbeat", "addr", conn.RemoteAddr())
+	} else {
+		go sendHeartbeat(conn, interval, d.heartbeats[conn])
+	}
 
 	return nil
 }
@@ -88,7 +116,7 @@ func sendHeartbeat(conn *net.TCPConn, interval time.Duration, done chan int) {
 		case <-done:
 			slog.Debug("finished sending heartbeats")
 			return
-		default:
+		case <-time.After(interval):
 			slog.Debug("sending heartbeat", "addr", conn.RemoteAddr())
 			msg := new(heartbeatMsg)
 			_, err := conn.Write(msg.Bytes())
@@ -96,7 +124,6 @@ func sendHeartbeat(conn *net.TCPConn, interval time.Duration, done chan int) {
 				slog.Warn("failed to send a heartbeat to conn", "addr", conn.RemoteAddr(), "err", err.Error())
 				return
 			}
-			time.Sleep(interval)
 		}
 	}
 }
@@ -253,22 +280,32 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 			d.tickets[plate][date] = newTicket
 			d.ticketsLock.Unlock()
 
-			// TODO: put this into a channel that can be re-enqueued after a timeout
-			// if there are no dispatchers available or if the transfer fails
-			go d.dispatchTicket(newTicket)
+			d.ticketsToSend <- newTicket
 			// Should we delete the previous timestamp and keep only the latest one?
 		}
 	}
 }
 
-// TODO: handle cases when the target dispatcher is not available
+func (d *daemon) processPendingTickets() {
+	for {
+		select {
+		case t := <-d.ticketsToSend:
+			slog.Debug("processing pending ticket", "plate", t.plate, "road", t.road, "timestamp", t.timestamp2)
+			go d.dispatchTicket(t)
+		default:
+			time.Sleep(ticketsToSendIntervalMS * time.Millisecond)
+		}
+	}
+}
+
 func (d *daemon) dispatchTicket(t *ticket) {
-	slog.Debug("looking for dispatchers", "timestamp", t.timestamp2)
+	slog.Debug("looking for dispatchers", "plate", t.plate, "road", t.road, "timestamp", t.timestamp2)
 	for _, disp := range d.dispatchers {
 		if slices.Contains(disp.roads, t.road) {
 			payload := t.Bytes()
 			if _, err := disp.conn.Write(payload); err != nil {
 				slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
+				d.ticketsToSend <- t
 			} else {
 				t.sent = true
 			}
@@ -276,6 +313,9 @@ func (d *daemon) dispatchTicket(t *ticket) {
 			return
 		}
 	}
+	slog.Debug("no dispatchers present, retrying", "plate", t.plate, "road", t.road, "timestamp", t.timestamp2)
+	time.Sleep(ticketsToSendIntervalMS * time.Millisecond)
+	d.ticketsToSend <- t
 }
 
 func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {

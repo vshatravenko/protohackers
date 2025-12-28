@@ -16,6 +16,7 @@ func main() {
 	logger.ConfigureDefaultLoggerFromEnv()
 
 	d := newDaemon()
+	go d.processPendingTickets()
 
 	srv, err := server.NewTCPServerFromEnv(handler(d))
 	if err != nil {
