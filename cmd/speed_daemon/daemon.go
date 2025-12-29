@@ -60,7 +60,12 @@ func (d *daemon) handleConn(c net.Conn, payload []byte) {
 		slog.Debug("parsed camera msg", "addr", conn.RemoteAddr())
 		d.handleCamera(conn, payload)
 	case msgTypes["dispatcher"]:
-		msg := parseDispatcherMsg(payload)
+		msg, err := parseDispatcherMsg(payload)
+		if err != nil {
+			errMsg := &errorMsg{msg: err.Error()}
+			_, _ = conn.Write(errMsg.Bytes())
+			return
+		}
 		slog.Debug("parsed dispatcher msg", "addr", conn.RemoteAddr(), "msg", msg)
 		d.handleDispatcher(conn, msg.roads)
 	case msgTypes["want_heartbeat"]:
@@ -88,7 +93,10 @@ func (d *daemon) handleConn(c net.Conn, payload []byte) {
 }
 
 func (d *daemon) handleWantHeartbeat(conn *net.TCPConn, payload []byte) error {
-	msg := parseWantHeartbeatMsg(payload)
+	msg, err := parseWantHeartbeatMsg(payload)
+	if err != nil {
+		return err
+	}
 	interval := time.Duration(msg.interval) * time.Millisecond * 100
 
 	d.hbLock.Lock()
@@ -117,7 +125,6 @@ func sendHeartbeat(conn *net.TCPConn, interval time.Duration, done chan int) {
 			slog.Debug("finished sending heartbeats")
 			return
 		case <-time.After(interval):
-			slog.Debug("sending heartbeat", "addr", conn.RemoteAddr())
 			msg := new(heartbeatMsg)
 			_, err := conn.Write(msg.Bytes())
 			if err != nil {
@@ -130,7 +137,12 @@ func sendHeartbeat(conn *net.TCPConn, interval time.Duration, done chan int) {
 
 func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 	slog.Info("handling new camera", "addr", conn.RemoteAddr())
-	cMsg := parseCameraMsg(initPayload)
+	cMsg, err := parseCameraMsg(initPayload)
+	if err != nil {
+		errMsg := &errorMsg{msg: err.Error()}
+		_, _ = conn.Write(errMsg.Bytes())
+		return
+	}
 	c := &camera{conn: conn, road: cMsg.road, mile: cMsg.mile, limit: cMsg.limit}
 	slog.Info("parsed new camera", "addr", conn.RemoteAddr(), "camera", c)
 	defer closeConn(conn)
@@ -180,7 +192,10 @@ func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
 			payload = payload[5:] // msg type byte + uint32 (4 bytes)
 		case msgTypes["plate"]:
 			slog.Info("parsing camera plate msg", "addr", c.conn.RemoteAddr())
-			msg, offset := parsePlateMsg(payload)
+			msg, offset, err := parsePlateMsg(payload)
+			if err != nil {
+				return err
+			}
 			slog.Info("parsed plate message", "road", c.road, "mile", c.mile, "msg", msg)
 			d.handlePlate(msg.plate, msg.timestamp, c.road, c.mile, c.limit)
 			payload = payload[offset:]
@@ -334,6 +349,11 @@ func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {
 			return
 		}
 
+		if n == 0 {
+			slog.Warn("received a zero read from disp conn", "addr", disp.conn.RemoteAddr)
+			return
+		}
+
 		payload := b[:n]
 		msgType := payload[0]
 		if msgType != msgTypes["want_heartbeat"] {
@@ -440,7 +460,7 @@ type ticket struct {
 
 func parseTicket(input []byte) *ticket {
 	offset := 1
-	plate := parseFixedStr(input, offset)
+	plate, _ := parseFixedStr(input, offset) // don't care about the error since it's only used in tests
 	offset += len(plate) + 1
 
 	road := binary.BigEndian.Uint16(input[offset : offset+2])

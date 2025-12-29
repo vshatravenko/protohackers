@@ -3,18 +3,22 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 )
 
-var msgTypes = map[string]uint8{
-	"error":          0x10,
-	"plate":          0x20,
-	"ticket":         0x21,
-	"want_heartbeat": 0x40,
-	"heartbeat":      0x41,
-	"camera":         0x80,
-	"dispatcher":     0x81,
-}
+var (
+	msgTypes = map[string]uint8{
+		"error":          0x10,
+		"plate":          0x20,
+		"ticket":         0x21,
+		"want_heartbeat": 0x40,
+		"heartbeat":      0x41,
+		"camera":         0x80,
+		"dispatcher":     0x81,
+	}
+	errIncompletePayload = errors.New("the payload is incomplete")
+)
 
 // I could've parsed each payload directly into the target struct
 // but this way I could create mock payloads for testing
@@ -23,10 +27,15 @@ type errorMsg struct {
 	msg string
 }
 
-func parseErrorMsg(input []byte) *errorMsg {
-	msg := parseFixedStr(input, 1)
+// only used for integration tests
+func parseErrorMsg(input []byte) (*errorMsg, error) {
+	msg, err := parseFixedStr(input, 1)
+	if err != nil {
+		slog.Info("parseErrorMsg: incomplete payload")
+		return nil, errIncompletePayload
+	}
 
-	return &errorMsg{msg}
+	return &errorMsg{msg}, nil
 }
 
 func (e *errorMsg) Bytes() []byte {
@@ -38,16 +47,27 @@ func (e *errorMsg) Bytes() []byte {
 	return res
 }
 
+func (e *errorMsg) equal(input *errorMsg) bool {
+	return e.msg == input.msg
+}
+
 type plateMsg struct {
 	plate     string
 	timestamp uint32
 }
 
-func parsePlateMsg(input []byte) (*plateMsg, int) {
+func parsePlateMsg(input []byte) (*plateMsg, int, error) {
 	offset := 1 // msg type byte
-	plate := parseFixedStr(input, offset)
+	plate, err := parseFixedStr(input, offset)
+	if err != nil {
+		return nil, -1, err
+	}
 	offset += len(plate) + 1
 
+	if len(input[offset:]) < 4 {
+		slog.Info("parsePlateMsg - timestamp missing", "payload", input[offset:])
+		return nil, -1, errIncompletePayload
+	}
 	timestamp := binary.BigEndian.Uint32(input[offset:])
 	slog.Debug("Parsed plate message", "input", input, "plate", plate, "offset", offset, "timestamp", timestamp)
 	offset += 4
@@ -55,7 +75,7 @@ func parsePlateMsg(input []byte) (*plateMsg, int) {
 	return &plateMsg{
 		plate:     plate,
 		timestamp: timestamp,
-	}, offset
+	}, offset, nil
 }
 
 func (pm *plateMsg) Bytes() []byte {
@@ -80,10 +100,14 @@ type wantHeartbeatMsg struct {
 	interval uint32 // deciseconds, 25 == 2.5 seconds
 }
 
-func parseWantHeartbeatMsg(input []byte) *wantHeartbeatMsg {
+func parseWantHeartbeatMsg(input []byte) (*wantHeartbeatMsg, error) {
+	if len(input[1:]) < 4 {
+		slog.Info("parseWantHeartbeatMsg: incomplete payload", "input", input)
+		return nil, errIncompletePayload
+	}
 	interval := binary.BigEndian.Uint32(input[1:])
 
-	return &wantHeartbeatMsg{interval: interval}
+	return &wantHeartbeatMsg{interval: interval}, nil
 }
 
 func (whm *wantHeartbeatMsg) Bytes() []byte {
@@ -109,13 +133,17 @@ type iAmCameraMsg struct {
 	limit uint16 // miles per hour
 }
 
-func parseCameraMsg(input []byte) *iAmCameraMsg {
+func parseCameraMsg(input []byte) (*iAmCameraMsg, error) {
 	input = input[1:] // msg type
+	if len(input) < 6 {
+		slog.Info("parseCameraMsg partial payload detected", "input", input)
+		return nil, errIncompletePayload
+	}
 	road := binary.BigEndian.Uint16(input[:2])
 	mile := binary.BigEndian.Uint16(input[2:4])
 	limit := binary.BigEndian.Uint16(input[4:])
 
-	return &iAmCameraMsg{road: road, mile: mile, limit: limit}
+	return &iAmCameraMsg{road: road, mile: mile, limit: limit}, nil
 }
 
 func (cm *iAmCameraMsg) equal(input *iAmCameraMsg) bool {
@@ -144,19 +172,25 @@ type iAmDispatcherMsg struct {
 	roads    []uint16
 }
 
-func parseDispatcherMsg(input []byte) *iAmDispatcherMsg {
+func parseDispatcherMsg(input []byte) (*iAmDispatcherMsg, error) {
 	offset := 1 // strip the msg type
 	numRoads := uint8(input[offset])
-	slog.Debug("parseDispatcherMsg parsing", "numRoads", numRoads)
+	slog.Debug("parseDispatcherMsg: parsing", "numRoads", numRoads)
 	offset++
 
+	if len(input[offset:]) < int(numRoads)*2 {
+		slog.Info("parseDispatcherMsg: incomplete payload",
+			"expected_len", numRoads*2,
+			"actual_len", len(input[offset:]), "input", input)
+		return nil, errIncompletePayload
+	}
 	roads := make([]uint16, numRoads)
 	for i := range int(numRoads) {
 		roads[i] = binary.BigEndian.Uint16(input[offset : offset+2])
 		offset += 2
 	}
 
-	return &iAmDispatcherMsg{numRoads: numRoads, roads: roads}
+	return &iAmDispatcherMsg{numRoads: numRoads, roads: roads}, nil
 }
 
 func (cm *iAmDispatcherMsg) equal(input *iAmDispatcherMsg) bool {
@@ -196,17 +230,22 @@ func (dm *iAmDispatcherMsg) Bytes() []byte {
 	return res
 }
 
-func parseFixedStr(input []byte, start int) string {
+func parseFixedStr(input []byte, start int) (string, error) {
 	length := int(uint8(input[start]))
 
 	if length == 0 {
-		return ""
+		return "", nil
+	}
+
+	if len(input[start+1:]) < length {
+		slog.Info("parseFixedStr: incomplete payload", "expected_len", length, "actual_len", len(input[start+1:]), "input", input)
+		return "", errIncompletePayload
 	}
 
 	buf := input[start+1 : start+1+length]
 	res := string(buf)
 
-	return res
+	return res, nil
 }
 
 func fixedStrToBytes(input string) []byte {

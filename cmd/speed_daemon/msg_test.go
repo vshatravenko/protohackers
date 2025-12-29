@@ -33,26 +33,38 @@ var (
 	whm = wantHeartbeatMsg{
 		interval: 25,
 	}
+	errMsg = errorMsg{
+		msg: "touche",
+	}
 )
 
 func TestMsgEncodingParsing(t *testing.T) {
 	logger.ConfigureDefaultLoggerFromEnv()
 
 	b := cameraMsg.Bytes()
-	parsedCM := parseCameraMsg(b)
+	parsedCM, err := parseCameraMsg(b)
+	if err != nil {
+		t.Error(err)
+	}
 
 	if !cameraMsg.equal(parsedCM) {
 		t.Errorf("iAmCameraMsg:\nexpected: %+v\nactual: %+v", cameraMsg, *parsedCM)
 	}
 
 	b = dispatherMsg.Bytes()
-	parsedDM := parseDispatcherMsg(b)
+	parsedDM, err := parseDispatcherMsg(b)
+	if err != nil {
+		t.Error(err)
+	}
 	if !dispatherMsg.equal(parsedDM) {
 		t.Errorf("iAmDispatcherMsg:\nexpected: %+v\nactual: %+v", dispatherMsg, *parsedDM)
 	}
 
 	b = plate.Bytes()
-	parsedPlate, parsedOffset := parsePlateMsg(b)
+	parsedPlate, parsedOffset, err := parsePlateMsg(b)
+	if err != nil {
+		t.Error(err)
+	}
 	if !plate.equal(parsedPlate) {
 		t.Errorf("plateMsg:\nexpected: %+v\nactual: %+v", plate, *parsedPlate)
 	}
@@ -68,9 +80,21 @@ func TestMsgEncodingParsing(t *testing.T) {
 	}
 
 	b = whm.Bytes()
-	parsedWHM := parseWantHeartbeatMsg(b)
+	parsedWHM, err := parseWantHeartbeatMsg(b)
+	if err != nil {
+		t.Error(err)
+	}
+
 	if !whm.equal(parsedWHM) {
 		t.Errorf("want_heartbeat:\nexpected: %+v\nactual: %+v", whm, *parsedWHM)
 	}
 
+	b = errMsg.Bytes()
+	parsedErrMsg, err := parseErrorMsg(b)
+	if err != nil {
+		t.Error(err)
+	}
+	if !errMsg.equal(parsedErrMsg) {
+		t.Errorf("error msg:\nexpected: %+v\nactual: %+v", errMsg, *parsedErrMsg)
+	}
 }
