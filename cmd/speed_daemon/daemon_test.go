@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vshatravenko/protohackers/internal/logger"
 	"github.com/vshatravenko/protohackers/internal/server"
 )
 
@@ -193,17 +194,18 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, hbMsg wantHeartbe
 
 }
 
-func TestSpeed(t *testing.T) {
-	const (
-		mile1    = 8
-		mile2    = 9
-		ts1      = 0
-		ts2      = 45
-		expected = 8000
-	)
+var speedTestCases = []*ticket{
+	{timestamp1: 0, timestamp2: 45, mile1: 8, mile2: 9, speed: 8000},
+	{timestamp1: 11565263, timestamp2: 11601479, mile1: 1016, mile2: 10, speed: 10000},
+}
 
-	actual := calculateSpeed(mile1, mile2, ts1, ts2)
-	if actual != expected {
-		t.Errorf("Speed:\nexpected: %d\nactual: %d", expected, actual)
+func TestSpeed(t *testing.T) {
+	logger.ConfigureDefaultLoggerFromEnv()
+
+	for _, tc := range speedTestCases {
+		actual := calculateSpeed(tc.mile1, tc.mile2, tc.timestamp1, tc.timestamp2)
+		if actual != tc.speed {
+			t.Errorf("Speed:\nexpected: %d\nactual: %d", tc.speed, actual)
+		}
 	}
 }

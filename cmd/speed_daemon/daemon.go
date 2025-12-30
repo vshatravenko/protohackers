@@ -83,6 +83,8 @@ func (d *daemon) handleConn(c net.Conn, payload []byte) {
 			if err != nil {
 				if err != io.EOF {
 					slog.Warn("failed to read from conn after want_heartbeat", "addr", conn.RemoteAddr(), "err", err.Error())
+				} else {
+					slog.Debug("handleConn: want_heartbeat: reached EOF", "addr", conn.RemoteAddr())
 				}
 				return
 			}
@@ -171,7 +173,10 @@ func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 				slog.Warn("failed to read from camera conn", "road", c.road, "mile", c.mile, "err", err.Error())
 				errMsg := &errorMsg{msg: err.Error()}
 				_, _ = c.conn.Write(errMsg.Bytes())
+			} else {
+				slog.Debug("handleCamera: reached EOF", "addr", conn.RemoteAddr())
 			}
+
 			return
 		}
 
@@ -363,6 +368,8 @@ func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {
 		if err != nil {
 			if err != io.EOF {
 				slog.Warn("failed to read from disp conn", "addr", disp.conn.RemoteAddr, "err", err.Error())
+			} else {
+				slog.Debug("handleDispatcher: reached EOF", "addr", conn.RemoteAddr())
 			}
 			return
 		}
@@ -539,6 +546,7 @@ func (t *ticket) Bytes() []byte {
 }
 
 func closeConn(conn *net.TCPConn) {
+	slog.Debug("closing conn", "addr", conn.RemoteAddr())
 	if err := conn.Close(); err != nil {
 		slog.Info("could not close conn", "addr", conn.RemoteAddr(), "err", err.Error())
 	}
@@ -558,7 +566,7 @@ func filterRecordsByPlate(records []*record, plate string) []*record {
 
 func calculateSpeed(mile1, mile2 uint16, ts1, ts2 uint32) uint16 {
 	duration := float64(ts2 - ts1)
-	distance := float64(mile2 - mile1)
+	distance := math.Abs(float64(mile2) - float64(mile1))
 	mph := distance * 3600 / duration
 	speed := uint16(mph * 100) // 100x as per the specification
 
