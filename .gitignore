@@ -2,3 +2,4 @@ out/
 .env*
 .github/
 TODO.md
+test*.out

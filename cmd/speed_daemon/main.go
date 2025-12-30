@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net"
 
@@ -49,7 +50,14 @@ func handler(d *daemon) func(net.Conn) {
 
 		n, err := conn.Read(b)
 		if err != nil {
-			slog.Warn("initial conn read failed", "addr", conn.RemoteAddr(), "err", err.Error())
+			if err != io.EOF {
+				slog.Warn("initial conn read failed", "addr", conn.RemoteAddr(), "err", err.Error())
+			}
+			return
+		}
+
+		if n == 0 {
+			slog.Warn("zero read detected on initial conn, aborting", "addr", conn.RemoteAddr())
 			return
 		}
 

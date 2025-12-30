@@ -69,7 +69,6 @@ func parsePlateMsg(input []byte) (*plateMsg, int, error) {
 		return nil, -1, errIncompletePayload
 	}
 	timestamp := binary.BigEndian.Uint32(input[offset:])
-	slog.Debug("Parsed plate message", "input", input, "plate", plate, "offset", offset, "timestamp", timestamp)
 	offset += 4
 
 	return &plateMsg{

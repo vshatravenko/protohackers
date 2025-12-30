@@ -24,7 +24,9 @@ var (
 	}
 	testCamera1Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 0},
-		{plate: "UN1X", timestamp: 100},
+		{plate: "LOL1X", timestamp: 125},
+		{plate: "T3ST", timestamp: 150},
+		{plate: "UN1X", timestamp: 300},
 	}
 	testCamera2Init = iAmCameraMsg{
 		road:  123,
@@ -36,7 +38,9 @@ var (
 	}
 	testCamera2Plates = []plateMsg{
 		{plate: "UN1X", timestamp: 45},
-		{plate: "UN1X", timestamp: 145},
+		{plate: "LOL1X", timestamp: 126},
+		{plate: "T3ST", timestamp: 160},
+		{plate: "UN1X", timestamp: 1000},
 	}
 	testDispatcher1Init = iAmDispatcherMsg{
 		numRoads: 2,
@@ -47,6 +51,8 @@ var (
 	}
 	testDispatcher1Tickets = []*ticket{
 		{plate: "UN1X", road: 123, mile1: 8, timestamp1: 0, mile2: 9, timestamp2: 45, speed: 8000},
+		{plate: "LOL1X", road: 123, mile1: 8, timestamp1: 125, mile2: 9, timestamp2: 126, speed: 32320},
+		{plate: "T3ST", road: 123, mile1: 8, timestamp1: 150, mile2: 9, timestamp2: 160, speed: 36000},
 	}
 	testTimeout = 15 * time.Second
 )
@@ -148,26 +154,39 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, hbMsg wantHeartbe
 
 		payload := b[:n]
 
-		slog.Info("test dispatcher received msg", "id", id)
-		msgType := payload[0]
-		switch msgType {
-		case msgTypes["ticket"]:
-			slog.Info("test dispatcher received ticket msg", "id", id)
-			actual := parseTicket(payload)
-			slog.Info("test dispatcher parsed ticket msg", "id", id, "ticket", actual)
-			expected := expectedTickets[0]
-			expectedTickets = expectedTickets[1:]
-			if expected.equal(actual) {
-				slog.Info("ticket equality check passed", "id", id, "ticket", actual)
-			} else {
-				t.Errorf("ticket equality check failed:\nactual:%v\nexpected: %v", actual, expected)
-			}
-			wg.Done()
+		for len(payload) > 0 {
+			slog.Info("test dispatcher processing payload", "id", id)
+			msgType := payload[0]
+			switch msgType {
+			case msgTypes["ticket"]:
+				slog.Info("test dispatcher received ticket msg", "id", id)
+				actual := parseTicket(payload)
+				slog.Info("test dispatcher parsed ticket msg", "id", id, "ticket", actual)
+				found := false
+				for _, t := range expectedTickets {
+					if t.equal(actual) {
+						slog.Info("test dispatcher received an expected ticket", "id", id, "ticket", actual)
+						found = true
+						wg.Done()
+						break
+					}
+				}
 
-		case msgTypes["heartbeat"]:
-			slog.Info("test dispatcher received heartbeat", "id", id)
-		default:
-			t.Errorf("test dispatcher %s received unexpected msg type - 0x%X", id, msgType)
+				if !found {
+					t.Errorf("test dispatcher %s received an unexpected ticket: %+v", id, actual)
+				}
+
+				offset := 1 + len(actual.plate) + 1 + 16
+				payload = payload[offset:]
+				slog.Debug("test dispatcher shifted the payload", "id", id, "payload", payload)
+
+			case msgTypes["heartbeat"]:
+				slog.Info("test dispatcher received heartbeat", "id", id)
+				payload = payload[1:]
+			default:
+				t.Errorf("test dispatcher %s received unexpected msg type - 0x%X", id, msgType)
+				return
+			}
 		}
 
 	}

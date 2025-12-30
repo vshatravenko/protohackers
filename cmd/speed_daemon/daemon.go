@@ -16,7 +16,7 @@ import (
 
 const (
 	ticketsToSendSize       = 20
-	ticketsToSendIntervalMS = 500
+	ticketsToSendIntervalMS = 100
 )
 
 var (
@@ -80,8 +80,11 @@ func (d *daemon) handleConn(c net.Conn, payload []byte) {
 		} else {
 			buf := make([]byte, bufSize)
 			n, err := conn.Read(buf)
-			if err != nil && err != io.EOF {
-				slog.Warn("failed to read from conn after want_heartbeat", "addr", conn.RemoteAddr(), "err", err.Error())
+			if err != nil {
+				if err != io.EOF {
+					slog.Warn("failed to read from conn after want_heartbeat", "addr", conn.RemoteAddr(), "err", err.Error())
+				}
+				return
 			}
 			d.handleConn(conn, buf[:n])
 		}
@@ -163,10 +166,12 @@ func (d *daemon) handleCamera(conn *net.TCPConn, initPayload []byte) {
 	for {
 		b := make([]byte, bufSize)
 		n, err := c.conn.Read(b)
-		if err != nil && err != io.EOF {
-			slog.Warn("failed to read from camera conn", "road", c.road, "mile", c.mile, "err", err.Error())
-			errMsg := &errorMsg{msg: err.Error()}
-			_, _ = c.conn.Write(errMsg.Bytes())
+		if err != nil {
+			if err != io.EOF {
+				slog.Warn("failed to read from camera conn", "road", c.road, "mile", c.mile, "err", err.Error())
+				errMsg := &errorMsg{msg: err.Error()}
+				_, _ = c.conn.Write(errMsg.Bytes())
+			}
 			return
 		}
 
@@ -197,8 +202,9 @@ func (d *daemon) processCameraPayload(c *camera, payload []byte) error {
 				return err
 			}
 			slog.Info("parsed plate message", "road", c.road, "mile", c.mile, "msg", msg)
-			d.handlePlate(msg.plate, msg.timestamp, c.road, c.mile, c.limit)
+			go d.handlePlate(msg.plate, msg.timestamp, c.road, c.mile, c.limit)
 			payload = payload[offset:]
+			slog.Debug("processCameraPayload: shifted payload", "payload", payload)
 		default:
 			slog.Info("invalid payload type", "addr", c.conn.RemoteAddr())
 			return fmt.Errorf("%b message type is invalid", payload[0])
@@ -218,86 +224,95 @@ Algo:
 func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) {
 	d.recordsLock.Lock()
 
-	_, exists := d.records[plate]
+	_, recordsExist := d.records[plate]
 
 	curRecord := &record{plate: plate, mile: mile, timestamp: ts}
-	slog.Debug("inserting record for plate", "plate", plate, "record", curRecord)
+	slog.Debug("inserting record for plate", "plate", plate, "record", *curRecord)
 	d.records[plate] = append(d.records[plate], curRecord)
 	d.recordsLock.Unlock()
 
+	if !recordsExist {
+		slog.Debug("initial record for plate, skipping the ticket check", "plate", plate, "record", *curRecord)
+		return
+	}
+
 	date := time.Unix(int64(curRecord.timestamp), 0).Format("02-01-2006") // FYI, we have to use these in Go instead of YYYY...
+	slog.Debug("checking for an existing ticket for the current day", "plate", plate, "date", date)
 	d.ticketsLock.RLock()
-	if _, ok := d.tickets[plate][date]; ok {
+	_, ticketTodayExists := d.tickets[plate][date]
+	d.ticketsLock.RUnlock()
+
+	if ticketTodayExists {
 		slog.Debug("found existing ticket for the current day, skipping speed limit check", "plate", plate, "date", date)
 		return
 	}
-	d.ticketsLock.RUnlock()
 
-	if exists {
-		slog.Debug("found existing records, checking for speed limit", "plate", plate)
-		d.recordsLock.RLock()
-		defer d.recordsLock.RUnlock()
-		records := filterRecordsByPlate(d.records[plate], plate)
-		slices.SortFunc(records, sortRecords)
+	slog.Debug("checking for speed limit", "plate", plate, "record", *curRecord)
+	d.recordsLock.RLock()
+	records := filterRecordsByPlate(d.records[plate], plate) // may need to filter by road too
+	d.recordsLock.RUnlock()
+	slices.SortFunc(records, sortRecords)
 
-		var curPos int
-		for i := range len(records) {
-			if records[i].timestamp == curRecord.timestamp {
-				curPos = i
-				break
-			}
+	var curPos int
+	for i := range len(records) {
+		if records[i].timestamp == curRecord.timestamp {
+			curPos = i
+			break
 		}
+	}
 
-		// TODO: we need to ensure that the previous record doesn't have the same mile
-		var prevRecord *record
-		// TODO: we may need to retroactively check for speed violations
-		// in case earlier tickets come in the future
-		if curPos == 0 {
-			slog.Debug("this is the earliest record, comparing to the future one", "plate", plate, "timestamp", ts)
-			prevRecord = curRecord
-			curRecord = records[curPos+1]
-		} else {
-			prevRecord = records[curPos-1]
-			slog.Debug("found previous chronological record", "plate", plate, "record", *prevRecord)
+	// TODO: we need to ensure that the previous record doesn't have the same mile
+	var prevRecord *record
+	// TODO: we may need to retroactively check for speed violations
+	// in case earlier tickets come in the future
+	if curPos == 0 {
+		slog.Debug("this is the earliest record, comparing to the future one", "plate", plate, "timestamp", ts)
+		prevRecord = curRecord
+		curRecord = records[curPos+1]
+	} else {
+		prevRecord = records[curPos-1]
+		slog.Debug("found previous chronological record", "plate", plate, "record", *prevRecord)
+	}
+
+	speed := calculateSpeed(prevRecord.mile, curRecord.mile, prevRecord.timestamp, curRecord.timestamp)
+	slog.Debug("calculated speed",
+		"mile1", prevRecord.mile, "mile2", curRecord.mile,
+		"ts1", prevRecord.timestamp, "ts2", curRecord.timestamp,
+		"speed", speed,
+	)
+
+	mph := uint16(math.Round(float64(speed) / 100))
+	slog.Info("converted speed to mph", "speed", speed, "mph", mph)
+
+	if mph > limit {
+		newTicket := &ticket{
+			plate:      plate,
+			timestamp1: prevRecord.timestamp,
+			mile1:      prevRecord.mile,
+			timestamp2: curRecord.timestamp,
+			mile2:      curRecord.mile,
+			road:       road,
+			speed:      speed,
+			sent:       false,
 		}
+		slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
 
-		speed := calculateSpeed(prevRecord.mile, curRecord.mile, prevRecord.timestamp, curRecord.timestamp)
-		slog.Debug("calculated speed",
-			"mile1", prevRecord.mile, "mile2", curRecord.mile,
-			"ts1", prevRecord.timestamp, "ts2", curRecord.timestamp,
-			"speed", speed,
-		)
+		// TODO: check the latest issued ticket for that day
 
-		mph := uint16(math.Round(float64(speed) / 100))
-		slog.Info("converted speed to mph", "speed", speed, "mph", mph)
+		slog.Debug("new ticket: waiting for the lock", "ticket", newTicket)
+		d.ticketsLock.Lock()
+		slog.Debug("new ticket: acquired the lock", "ticket", newTicket)
+		if _, ok := d.tickets[plate]; !ok {
+			d.tickets[plate] = make(map[string]*ticket)
 
-		if mph > limit {
-			newTicket := &ticket{
-				plate:      plate,
-				timestamp1: prevRecord.timestamp,
-				mile1:      prevRecord.mile,
-				timestamp2: curRecord.timestamp,
-				mile2:      curRecord.mile,
-				road:       road,
-				speed:      speed,
-				sent:       false,
-			}
-			slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
-
-			// TODO: check the latest issued ticket for that day
-
-			slog.Debug("Issued a new ticket", "ticket", newTicket)
-			d.ticketsLock.Lock()
-			if _, ok := d.tickets[plate]; !ok {
-				d.tickets[plate] = make(map[string]*ticket)
-
-			}
-			d.tickets[plate][date] = newTicket
-			d.ticketsLock.Unlock()
-
-			d.ticketsToSend <- newTicket
-			// Should we delete the previous timestamp and keep only the latest one?
 		}
+		d.tickets[plate][date] = newTicket
+		slog.Debug("new ticket: appended, releasing the lock", "ticket", newTicket)
+		d.ticketsLock.Unlock()
+
+		slog.Debug("scheduling a new ticket", "ticket", *newTicket)
+		d.ticketsToSend <- newTicket
+		// Should we delete the previous timestamp and only keep the latest one?
 	}
 }
 
@@ -322,6 +337,7 @@ func (d *daemon) dispatchTicket(t *ticket) {
 				slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
 				d.ticketsToSend <- t
 			} else {
+				slog.Debug("dispatched ticket successfully", "addr", disp.conn.RemoteAddr(), "ticket", t)
 				t.sent = true
 			}
 
@@ -344,8 +360,10 @@ func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {
 	for {
 		b := make([]byte, bufSize)
 		n, err := disp.conn.Read(b)
-		if err != nil && err != io.EOF {
-			slog.Warn("failed to read from disp conn", "addr", disp.conn.RemoteAddr, "err", err.Error())
+		if err != nil {
+			if err != io.EOF {
+				slog.Warn("failed to read from disp conn", "addr", disp.conn.RemoteAddr, "err", err.Error())
+			}
 			return
 		}
 
