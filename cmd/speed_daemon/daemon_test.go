@@ -43,9 +43,31 @@ var (
 		{plate: "T3ST", timestamp: 160},
 		{plate: "UN1X", timestamp: 1000},
 	}
+	testCamera3Init = iAmCameraMsg{
+		road:  224,
+		mile:  10,
+		limit: 25,
+	}
+	testCamera3Hb = wantHeartbeatMsg{
+		interval: 10, // 1 second
+	}
+	testCamera3Plates = []plateMsg{
+		{plate: "MULT1", timestamp: 1767027383},
+	}
+	testCamera4Init = iAmCameraMsg{
+		road:  224,
+		mile:  1400,
+		limit: 25,
+	}
+	testCamera4Hb = wantHeartbeatMsg{
+		interval: 0, // never
+	}
+	testCamera4Plates = []plateMsg{
+		{plate: "MULT1", timestamp: 1767200183},
+	}
 	testDispatcher1Init = iAmDispatcherMsg{
 		numRoads: 2,
-		roads:    []uint16{123, 224},
+		roads:    []uint16{123, 255},
 	}
 	testDispatcher1Hb = wantHeartbeatMsg{
 		interval: 30, // 3 seconds
@@ -54,6 +76,18 @@ var (
 		{plate: "UN1X", road: 123, mile1: 8, timestamp1: 0, mile2: 9, timestamp2: 45, speed: 8000},
 		{plate: "LOL1X", road: 123, mile1: 8, timestamp1: 125, mile2: 9, timestamp2: 126, speed: 32320},
 		{plate: "T3ST", road: 123, mile1: 8, timestamp1: 150, mile2: 9, timestamp2: 160, speed: 36000},
+	}
+	testDispatcher2Init = iAmDispatcherMsg{
+		numRoads: 1,
+		roads:    []uint16{224},
+	}
+	testDispatcher2Hb = wantHeartbeatMsg{
+		interval: 30, // 3 seconds
+	}
+	testDispatcher2Tickets = []*ticket{ // multiple tickets since it spans three days
+		{plate: "MULT1", road: 224, mile1: 10, timestamp1: 1767027383, mile2: 1400, timestamp2: 1767052800, speed: 2895},
+		{plate: "MULT1", road: 224, mile1: 10, timestamp1: 1767052800, mile2: 1400, timestamp2: 1767139200, speed: 2895},
+		{plate: "MULT1", road: 224, mile1: 10, timestamp1: 1767139200, mile2: 1400, timestamp2: 1767200183, speed: 2895},
 	}
 	testTimeout = 15 * time.Second
 )
@@ -70,10 +104,14 @@ func TestDaemon(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	go runTestCamera(t, testCamera1Init, testCamera1Hb, testCamera1Plates)
 	go runTestCamera(t, testCamera2Init, testCamera2Hb, testCamera2Plates)
+	go runTestCamera(t, testCamera3Init, testCamera3Hb, testCamera3Plates)
+	go runTestCamera(t, testCamera4Init, testCamera4Hb, testCamera4Plates)
 	wg := new(sync.WaitGroup)
 	wg.Add(len(testDispatcher1Tickets))
+	wg.Add(len(testDispatcher2Tickets))
 	time.Sleep(time.Second) // simulate an unavailable dispatcher
 	go runTestDispatcher(t, testDispatcher1Init, testDispatcher1Hb, testDispatcher1Tickets, wg)
+	go runTestDispatcher(t, testDispatcher2Init, testDispatcher2Hb, testDispatcher2Tickets, wg)
 
 	done := make(chan int)
 	go func() {
@@ -197,6 +235,7 @@ func runTestDispatcher(t *testing.T, initMsg iAmDispatcherMsg, hbMsg wantHeartbe
 var speedTestCases = []*ticket{
 	{timestamp1: 0, timestamp2: 45, mile1: 8, mile2: 9, speed: 8000},
 	{timestamp1: 11565263, timestamp2: 11601479, mile1: 1016, mile2: 10, speed: 10000},
+	{timestamp1: 1767027383, timestamp2: 1767200183, mile1: 10, mile2: 1400, speed: 2895},
 }
 
 func TestSpeed(t *testing.T) {

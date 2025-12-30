@@ -29,7 +29,7 @@ type daemon struct {
 	dispLock      *sync.RWMutex
 	records       map[string][]*record
 	recordsLock   *sync.RWMutex
-	tickets       map[string]map[string]*ticket
+	tickets       map[string]map[int]*ticket
 	ticketsLock   *sync.RWMutex
 	ticketsToSend chan *ticket
 	heartbeats    map[*net.TCPConn]chan int
@@ -42,7 +42,7 @@ func newDaemon() *daemon {
 		dispLock:      new(sync.RWMutex),
 		records:       make(map[string][]*record),
 		recordsLock:   new(sync.RWMutex),
-		tickets:       make(map[string]map[string]*ticket),
+		tickets:       make(map[string]map[int]*ticket),
 		ticketsLock:   new(sync.RWMutex),
 		ticketsToSend: make(chan *ticket, ticketsToSendSize),
 		heartbeats:    make(map[*net.TCPConn]chan int),
@@ -241,16 +241,18 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 		return
 	}
 
-	date := time.Unix(int64(curRecord.timestamp), 0).Format("02-01-2006") // FYI, we have to use these in Go instead of YYYY...
-	slog.Debug("checking for an existing ticket for the current day", "plate", plate, "date", date)
-	d.ticketsLock.RLock()
-	_, ticketTodayExists := d.tickets[plate][date]
-	d.ticketsLock.RUnlock()
+	/*
+		day := dayFromTS(curRecord.timestamp)
+		slog.Debug("checking for an existing ticket for the current day", "plate", plate, "day", day)
+		d.ticketsLock.RLock()
+		_, ticketTodayExists := d.tickets[plate][day]
+		d.ticketsLock.RUnlock()
 
-	if ticketTodayExists {
-		slog.Debug("found existing ticket for the current day, skipping speed limit check", "plate", plate, "date", date)
-		return
-	}
+		if ticketTodayExists {
+			slog.Debug("found existing ticket for the current day, skipping speed limit check", "plate", plate, "day", day)
+			return
+		}
+	*/
 
 	slog.Debug("checking for speed limit", "plate", plate, "record", *curRecord)
 	d.recordsLock.RLock()
@@ -290,33 +292,56 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 	slog.Info("converted speed to mph", "speed", speed, "mph", mph)
 
 	if mph > limit {
-		newTicket := &ticket{
-			plate:      plate,
-			timestamp1: prevRecord.timestamp,
-			mile1:      prevRecord.mile,
-			timestamp2: curRecord.timestamp,
-			mile2:      curRecord.mile,
-			road:       road,
-			speed:      speed,
-			sent:       false,
-		}
-		slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit)
+		startDay := dayFromTS(prevRecord.timestamp)
+		endDay := dayFromTS(curRecord.timestamp)
+		slog.Debug("detected speed violation", "speed", speed, "mph", mph, "limit", limit, "prev_day", startDay, "cur_day", endDay)
 
-		// TODO: check the latest issued ticket for that day
-
-		slog.Debug("new ticket: waiting for the lock", "ticket", newTicket)
+		slog.Debug("new ticket: waiting for the lock", "plate", plate)
 		d.ticketsLock.Lock()
-		slog.Debug("new ticket: acquired the lock", "ticket", newTicket)
+
 		if _, ok := d.tickets[plate]; !ok {
-			d.tickets[plate] = make(map[string]*ticket)
-
+			d.tickets[plate] = make(map[int]*ticket)
 		}
-		d.tickets[plate][date] = newTicket
-		slog.Debug("new ticket: appended, releasing the lock", "ticket", newTicket)
-		d.ticketsLock.Unlock()
 
-		slog.Debug("scheduling a new ticket", "ticket", *newTicket)
-		d.ticketsToSend <- newTicket
+		prevTimestamp := prevRecord.timestamp
+		curTimestamp := curRecord.timestamp
+
+		slog.Debug("new ticket: acquired the lock", "plate", plate)
+		for curDay := startDay; curDay <= endDay; curDay++ {
+			slog.Debug("looking for tickets", "plate", plate, "day", curDay)
+			if _, ok := d.tickets[plate][curDay]; ok {
+				slog.Debug("found existing ticket, continuing", "plate", plate, "day", curDay)
+				continue
+			}
+
+			var ts1, ts2 uint32
+			if curDay != endDay {
+				ts2 = uint32(curDay+1) * 86400
+			} else {
+				ts2 = curTimestamp
+			}
+
+			ts1 = prevTimestamp
+			prevTimestamp = ts2
+
+			newTicket := &ticket{
+				plate:      plate,
+				timestamp1: ts1,
+				mile1:      prevRecord.mile,
+				timestamp2: ts2,
+				mile2:      curRecord.mile,
+				road:       road,
+				speed:      speed,
+				sent:       false,
+			}
+
+			d.tickets[plate][curDay] = newTicket
+
+			slog.Debug("scheduling new ticket", "ticket", *newTicket, "day", curDay)
+			d.ticketsToSend <- newTicket
+		}
+		d.ticketsLock.Unlock()
+		slog.Debug("new ticket: released the lock", "plate", plate)
 		// Should we delete the previous timestamp and only keep the latest one?
 	}
 }
@@ -585,4 +610,8 @@ func prettyPrintRecords(records []*record) string {
 func sendErrMsg(conn *net.TCPConn, msg string) {
 	errMsg := &errorMsg{msg: msg}
 	_, _ = conn.Write(errMsg.Bytes())
+}
+
+func dayFromTS(ts uint32) int {
+	return int(math.Floor(float64(ts) / 86400))
 }
