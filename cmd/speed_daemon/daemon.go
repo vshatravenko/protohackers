@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	ticketsToSendSize       = 20
+	ticketsToSendSize       = 100
 	ticketsToSendIntervalMS = 100
+	connWriteDeadline       = time.Second
 )
 
 var (
@@ -227,11 +228,10 @@ Algo:
   - Otherwise, append the current record to said plate's array
 */
 func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) {
-	d.recordsLock.Lock()
-
-	_, recordsExist := d.records[plate]
-
 	curRecord := &record{plate: plate, mile: mile, timestamp: ts}
+
+	d.recordsLock.Lock()
+	_, recordsExist := d.records[plate]
 	slog.Debug("inserting record for plate", "plate", plate, "record", *curRecord)
 	d.records[plate] = append(d.records[plate], curRecord)
 	d.recordsLock.Unlock()
@@ -298,50 +298,41 @@ func (d *daemon) handlePlate(plate string, ts uint32, road, mile, limit uint16) 
 
 		slog.Debug("new ticket: waiting for the lock", "plate", plate)
 		d.ticketsLock.Lock()
+		slog.Debug("new ticket: acquired the lock", "plate", plate)
 
 		if _, ok := d.tickets[plate]; !ok {
 			d.tickets[plate] = make(map[int]*ticket)
 		}
 
-		prevTimestamp := prevRecord.timestamp
-		curTimestamp := curRecord.timestamp
-
-		slog.Debug("new ticket: acquired the lock", "plate", plate)
 		for curDay := startDay; curDay <= endDay; curDay++ {
 			slog.Debug("looking for tickets", "plate", plate, "day", curDay)
-			if _, ok := d.tickets[plate][curDay]; ok {
-				slog.Debug("found existing ticket, continuing", "plate", plate, "day", curDay)
-				continue
+			if t, ok := d.tickets[plate][curDay]; ok {
+				slog.Debug("found existing ticket, skipping", "plate", plate, "day", curDay, "ticket", *t)
+				d.ticketsLock.Unlock()
+				return
 			}
+		}
 
-			var ts1, ts2 uint32
-			if curDay != endDay {
-				ts2 = uint32(curDay+1) * 86400
-			} else {
-				ts2 = curTimestamp
-			}
+		newTicket := &ticket{
+			plate:      plate,
+			timestamp1: prevRecord.timestamp,
+			mile1:      prevRecord.mile,
+			timestamp2: curRecord.timestamp,
+			mile2:      curRecord.mile,
+			road:       road,
+			speed:      speed,
+			sent:       false,
+		}
 
-			ts1 = prevTimestamp
-			prevTimestamp = ts2
-
-			newTicket := &ticket{
-				plate:      plate,
-				timestamp1: ts1,
-				mile1:      prevRecord.mile,
-				timestamp2: ts2,
-				mile2:      curRecord.mile,
-				road:       road,
-				speed:      speed,
-				sent:       false,
-			}
-
+		for curDay := startDay; curDay <= endDay; curDay++ {
+			slog.Debug("recording new ticket", "ticket", *newTicket, "day", curDay)
 			d.tickets[plate][curDay] = newTicket
-
-			slog.Debug("scheduling new ticket", "ticket", *newTicket, "day", curDay)
-			d.ticketsToSend <- newTicket
 		}
 		d.ticketsLock.Unlock()
 		slog.Debug("new ticket: released the lock", "plate", plate)
+
+		slog.Debug("scheduling new ticket", "ticket", *newTicket)
+		d.ticketsToSend <- newTicket
 		// Should we delete the previous timestamp and only keep the latest one?
 	}
 }
@@ -358,11 +349,20 @@ func (d *daemon) processPendingTickets() {
 	}
 }
 
+/*
 func (d *daemon) dispatchTicket(t *ticket) {
-	slog.Debug("looking for dispatchers", "plate", t.plate, "road", t.road, "timestamp", t.timestamp2)
+	slog.Debug("looking for dispatchers", "plate", t.plate, "ticket", *t)
 	for _, disp := range d.dispatchers {
+		slog.Debug("checking dispatcher", "plate", t.plate, "ticket", *t, "disp", *disp)
 		if slices.Contains(disp.roads, t.road) {
+			slog.Debug("found dispatcher, trying to send", "plate", t.plate, "ticket", *t)
 			payload := t.Bytes()
+			if err := disp.conn.SetWriteDeadline(time.Now().Add(connWriteDeadline)); err != nil {
+				slog.Warn("failed to set the disp conn deadline", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", *t)
+				d.ticketsToSend <- t
+				return
+			}
+
 			if _, err := disp.conn.Write(payload); err != nil {
 				slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
 				d.ticketsToSend <- t
@@ -374,9 +374,34 @@ func (d *daemon) dispatchTicket(t *ticket) {
 			return
 		}
 	}
-	slog.Debug("no dispatchers present, retrying", "plate", t.plate, "road", t.road, "timestamp", t.timestamp2)
+	slog.Debug("no dispatchers present, retrying", "plate", t.plate, "ticket", *t)
 	time.Sleep(ticketsToSendIntervalMS * time.Millisecond)
 	d.ticketsToSend <- t
+}
+*/
+
+func (d *daemon) dispatchTicket(t *ticket) {
+	disp, found := d.findDispByRoad(t.road)
+	if !found {
+		slog.Debug("no dispatchers present, retrying", "plate", t.plate, "ticket", *t)
+		time.Sleep(ticketsToSendIntervalMS * time.Millisecond)
+		d.ticketsToSend <- t
+		return
+	}
+
+	if err := disp.conn.SetWriteDeadline(time.Now().Add(connWriteDeadline)); err != nil {
+		slog.Warn("failed to set the disp conn deadline", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", *t)
+		d.ticketsToSend <- t
+		return
+	}
+
+	if _, err := disp.conn.Write(t.Bytes()); err != nil {
+		slog.Warn("failed to dispatch ticket", "addr", disp.conn.RemoteAddr(), "err", err.Error(), "ticket", t)
+		d.ticketsToSend <- t
+	} else {
+		slog.Debug("dispatched ticket successfully", "addr", disp.conn.RemoteAddr(), "ticket", t)
+		t.sent = true
+	}
 }
 
 func (d *daemon) handleDispatcher(conn *net.TCPConn, roads []uint16) {
@@ -614,4 +639,27 @@ func sendErrMsg(conn *net.TCPConn, msg string) {
 
 func dayFromTS(ts uint32) int {
 	return int(math.Floor(float64(ts) / 86400))
+}
+
+func (d *daemon) findDispByRoad(road uint16) (*dispatcher, bool) {
+	slog.Debug("findDispByRoad(): started, waiting for lock", "road", road)
+	d.dispLock.RLock()
+	slog.Debug("findDispByRoad(): lock acquired", "road", road)
+	defer d.dispLock.RUnlock()
+
+	for _, disp := range d.dispatchers {
+		slog.Debug("findDispByRoad(): searching", "road", road, "disp", *disp)
+		for i := 0; i < len(disp.roads); i++ {
+			r := disp.roads[i]
+			slog.Debug("findDispByRoad(): searching road", "road", road, "cur", r, "disp", *disp)
+			if r == road {
+				slog.Debug("findDispByRoad(): found", "road", road, "cur", r, "disp", *disp)
+				return disp, true
+			}
+			slog.Debug("findDispByRoad(): not the right one, continuing", "road", road, "cur", r, "disp", *disp)
+		}
+	}
+
+	slog.Debug("findDispByRoad(): no dispatchers found", "road", road)
+	return nil, false
 }
